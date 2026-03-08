@@ -3,7 +3,8 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{Config, Linear.Client, Org.Adapter}
+  alias SymphonyElixir.Tracker.Issue
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -26,11 +27,42 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   }
 
+  @org_task_tool "org_task"
+  @org_task_description """
+  Read and update the current Org mode task and its in-heading Codex workpad through Symphony.
+  """
+  @org_task_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["action"],
+    "properties" => %{
+      "action" => %{
+        "type" => "string",
+        "description" => "One of `get_task`, `set_state`, `get_workpad`, or `replace_workpad`."
+      },
+      "taskId" => %{
+        "type" => ["string", "null"],
+        "description" => "Optional Org task ID. Defaults to the current issue when omitted."
+      },
+      "state" => %{
+        "type" => ["string", "null"],
+        "description" => "Display state name used with `set_state`, for example `In Progress`."
+      },
+      "content" => %{
+        "type" => ["string", "null"],
+        "description" => "Replacement workpad content used with `replace_workpad`."
+      }
+    }
+  }
+
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @org_task_tool ->
+        execute_org_task(arguments, opts)
 
       other ->
         failure_response(%{
@@ -44,13 +76,25 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   @spec tool_specs() :: [map()]
   def tool_specs do
-    [
-      %{
-        "name" => @linear_graphql_tool,
-        "description" => @linear_graphql_description,
-        "inputSchema" => @linear_graphql_input_schema
-      }
-    ]
+    case Config.tracker_kind() do
+      "orgmode" ->
+        [
+          %{
+            "name" => @org_task_tool,
+            "description" => @org_task_description,
+            "inputSchema" => @org_task_input_schema
+          }
+        ]
+
+      _ ->
+        [
+          %{
+            "name" => @linear_graphql_tool,
+            "description" => @linear_graphql_description,
+            "inputSchema" => @linear_graphql_input_schema
+          }
+        ]
+    end
   end
 
   defp execute_linear_graphql(arguments, opts) do
@@ -62,6 +106,41 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     else
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp execute_org_task(arguments, opts) do
+    org_adapter = Keyword.get(opts, :org_adapter, Adapter)
+
+    with {:ok, normalized} <- normalize_org_task_arguments(arguments, opts),
+         {:ok, response} <- run_org_task(normalized, org_adapter) do
+      success_response(response)
+    else
+      {:error, reason} ->
+        failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp run_org_task(%{action: "get_task", task_id: task_id}, org_adapter) do
+    org_adapter.get_task(task_id)
+  end
+
+  defp run_org_task(%{action: "set_state", task_id: task_id, state: state}, org_adapter) do
+    with :ok <- org_adapter.update_issue_state(task_id, state),
+         {:ok, task} <- org_adapter.get_task(task_id) do
+      {:ok, task}
+    end
+  end
+
+  defp run_org_task(%{action: "get_workpad", task_id: task_id}, org_adapter) do
+    with {:ok, content} <- org_adapter.get_workpad(task_id) do
+      {:ok, %{"taskId" => task_id, "content" => content}}
+    end
+  end
+
+  defp run_org_task(%{action: "replace_workpad", task_id: task_id, content: content}, org_adapter) do
+    with {:ok, updated_content} <- org_adapter.replace_workpad(task_id, content) do
+      {:ok, %{"taskId" => task_id, "content" => updated_content}}
     end
   end
 
@@ -89,6 +168,78 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_linear_graphql_arguments(_arguments), do: {:error, :invalid_arguments}
+
+  defp normalize_org_task_arguments(arguments, opts) when is_map(arguments) do
+    with {:ok, action} <- normalize_org_action(arguments),
+         {:ok, task_id} <- normalize_org_task_id(arguments, opts) do
+      case action do
+        "set_state" ->
+          with {:ok, state} <- normalize_org_state(arguments) do
+            {:ok, %{action: action, task_id: task_id, state: state}}
+          end
+
+        "replace_workpad" ->
+          with {:ok, content} <- normalize_org_content(arguments) do
+            {:ok, %{action: action, task_id: task_id, content: content}}
+          end
+
+        _ ->
+          {:ok, %{action: action, task_id: task_id}}
+      end
+    end
+  end
+
+  defp normalize_org_task_arguments(_arguments, _opts), do: {:error, :invalid_org_arguments}
+
+  defp normalize_org_action(arguments) do
+    case Map.get(arguments, "action") || Map.get(arguments, :action) do
+      action when action in ["get_task", "set_state", "get_workpad", "replace_workpad"] ->
+        {:ok, action}
+
+      _ ->
+        {:error, :invalid_org_action}
+    end
+  end
+
+  defp normalize_org_task_id(arguments, opts) do
+    case Map.get(arguments, "taskId") || Map.get(arguments, :taskId) || issue_id_from_opts(opts) do
+      task_id when is_binary(task_id) ->
+        case String.trim(task_id) do
+          "" -> {:error, :missing_org_task_id}
+          trimmed -> {:ok, trimmed}
+        end
+
+      _ ->
+        {:error, :missing_org_task_id}
+    end
+  end
+
+  defp normalize_org_state(arguments) do
+    case Map.get(arguments, "state") || Map.get(arguments, :state) do
+      state when is_binary(state) ->
+        case String.trim(state) do
+          "" -> {:error, :missing_org_state}
+          trimmed -> {:ok, trimmed}
+        end
+
+      _ ->
+        {:error, :missing_org_state}
+    end
+  end
+
+  defp normalize_org_content(arguments) do
+    case Map.get(arguments, "content") || Map.get(arguments, :content) do
+      content when is_binary(content) -> {:ok, content}
+      _ -> {:error, :missing_org_content}
+    end
+  end
+
+  defp issue_id_from_opts(opts) do
+    case Keyword.get(opts, :issue) do
+      %{id: issue_id} when is_binary(issue_id) -> issue_id
+      _ -> nil
+    end
+  end
 
   defp normalize_query(arguments) do
     case Map.get(arguments, "query") || Map.get(arguments, :query) do
@@ -129,6 +280,18 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
+  defp success_response(payload) do
+    %{
+      "success" => true,
+      "contentItems" => [
+        %{
+          "type" => "inputText",
+          "text" => encode_payload(payload)
+        }
+      ]
+    }
+  end
+
   defp failure_response(payload) do
     %{
       "success" => false,
@@ -142,10 +305,35 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp encode_payload(payload) when is_map(payload) or is_list(payload) do
-    Jason.encode!(payload, pretty: true)
+    payload
+    |> normalize_payload()
+    |> Jason.encode!(pretty: true)
   end
 
   defp encode_payload(payload), do: inspect(payload)
+
+  defp normalize_payload(%Issue{} = issue) do
+    issue
+    |> Map.from_struct()
+    |> normalize_payload()
+  end
+
+  defp normalize_payload(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+
+  defp normalize_payload(payload) when is_map(payload) do
+    Map.new(payload, fn {key, value} ->
+      {normalize_payload_key(key), normalize_payload(value)}
+    end)
+  end
+
+  defp normalize_payload(payload) when is_list(payload) do
+    Enum.map(payload, &normalize_payload/1)
+  end
+
+  defp normalize_payload(payload), do: payload
+
+  defp normalize_payload_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp normalize_payload_key(key), do: key
 
   defp tool_error_payload(:missing_query) do
     %{
@@ -167,6 +355,98 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     %{
       "error" => %{
         "message" => "`linear_graphql.variables` must be a JSON object when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_org_arguments) do
+    %{
+      "error" => %{
+        "message" => "`org_task` expects an object with an `action` field."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_org_action) do
+    %{
+      "error" => %{
+        "message" => "`org_task.action` must be one of `get_task`, `set_state`, `get_workpad`, or `replace_workpad`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_org_task_id) do
+    %{
+      "error" => %{
+        "message" => "`org_task` requires `taskId` unless the current issue context is available."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_org_state) do
+    %{
+      "error" => %{
+        "message" => "`org_task.state` is required for `set_state`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_org_content) do
+    %{
+      "error" => %{
+        "message" => "`org_task.content` is required for `replace_workpad`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:org_task_not_found) do
+    %{
+      "error" => %{
+        "message" => "The requested Org task was not found under the configured Symphony subtree."
+      }
+    }
+  end
+
+  defp tool_error_payload(:org_root_not_found) do
+    %{
+      "error" => %{
+        "message" => "The configured Org tracker root heading could not be found."
+      }
+    }
+  end
+
+  defp tool_error_payload(:org_state_not_found) do
+    %{
+      "error" => %{
+        "message" => "The requested Org state is not mapped in `tracker.state_map`."
+      }
+    }
+  end
+
+  defp tool_error_payload({:org_emacsclient_failed, status, output}) do
+    %{
+      "error" => %{
+        "message" => "Org task execution through `emacsclient` failed.",
+        "status" => status,
+        "output" => output
+      }
+    }
+  end
+
+  defp tool_error_payload({:org_emacsclient_failed, reason}) do
+    %{
+      "error" => %{
+        "message" => "Org task execution through `emacsclient` failed.",
+        "reason" => reason
+      }
+    }
+  end
+
+  defp tool_error_payload({:org_error, reason}) do
+    %{
+      "error" => %{
+        "message" => "Org task tool execution failed.",
+        "reason" => reason
       }
     }
   end
@@ -200,7 +480,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp tool_error_payload(reason) do
     %{
       "error" => %{
-        "message" => "Linear GraphQL tool execution failed.",
+        "message" => "Dynamic tool execution failed.",
         "reason" => inspect(reason)
       }
     }

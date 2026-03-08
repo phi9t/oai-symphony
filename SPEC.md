@@ -7,7 +7,7 @@ Purpose: Define a service that orchestrates coding agents to get project work do
 ## 1. Problem Statement
 
 Symphony is a long-running automation service that continuously reads work from an issue tracker
-(Linear in this specification version), creates an isolated workspace for each issue, and runs a
+(for example Linear or an Org mode task file), creates an isolated workspace for each issue, and runs a
 coding agent session for that issue inside the workspace.
 
 The service solves four operational problems:
@@ -119,7 +119,7 @@ Symphony is easiest to port when kept in these layers:
 4. `Execution Layer` (workspace + agent subprocess)
    - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
-5. `Integration Layer` (Linear adapter)
+5. `Integration Layer` (tracker adapter)
    - API calls and normalization for tracker data.
 
 6. `Observability Layer` (logs + optional status surface)
@@ -127,7 +127,7 @@ Symphony is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
+- Issue tracker API or local task source (for example Linear or an Org mode file).
 - Local filesystem for workspaces and logs.
 - Optional workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable that supports JSON-RPC-like app-server mode over stdio.
@@ -342,7 +342,7 @@ Fields:
 
 - `kind` (string)
   - Required for dispatch.
-  - Current supported value: `linear`
+  - Supported examples: `linear`, `orgmode`
 - `endpoint` (string)
   - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`
 - `api_key` (string)
@@ -351,6 +351,16 @@ Fields:
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
 - `project_slug` (string)
   - Required for dispatch when `tracker.kind == "linear"`.
+- `file` (string)
+  - Required for dispatch when `tracker.kind == "orgmode"`.
+  - May be a literal path or `$VAR_NAME`.
+- `root_id` (string)
+  - Required for dispatch when `tracker.kind == "orgmode"`.
+  - Identifies the Org heading whose subtree contains Symphony-managed tasks.
+- `emacsclient_command` (string)
+  - Default for `tracker.kind == "orgmode"`: `emacsclient -a emacs`
+- `state_map` (object)
+  - Used when `tracker.kind == "orgmode"` to map Org TODO keywords to normalized tracker states.
 - `active_states` (list of strings or comma-separated string)
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings or comma-separated string)
@@ -464,7 +474,7 @@ Template input variables:
 Fallback prompt behavior:
 
 - If the workflow prompt body is empty, the runtime may use a minimal default prompt
-  (`You are working on an issue from Linear.`).
+  (`You are working on a tracked issue.`).
 - Workflow file read/parse failures are configuration/validation errors and should not silently fall
   back to a prompt.
 
@@ -543,18 +553,21 @@ Validation checks:
 
 - Workflow file can be loaded and parsed.
 - `tracker.kind` is present and supported.
-- `tracker.api_key` is present after `$` resolution.
-- `tracker.project_slug` is present when required by the selected tracker kind.
+- tracker-specific required fields are present after `$` resolution.
 - `codex.command` is present and non-empty.
 
 ### 6.4 Config Fields Summary (Cheat Sheet)
 
 This section is intentionally redundant so a coding agent can implement the config layer quickly.
 
-- `tracker.kind`: string, required, currently `linear`
+- `tracker.kind`: string, required, for example `linear` or `orgmode`
 - `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, required when `tracker.kind=linear`
+- `tracker.file`: string, required when `tracker.kind=orgmode`
+- `tracker.root_id`: string, required when `tracker.kind=orgmode`
+- `tracker.emacsclient_command`: string, default `emacsclient -a emacs` when `tracker.kind=orgmode`
+- `tracker.state_map`: object, used when `tracker.kind=orgmode`
 - `tracker.active_states`: list/string, default `Todo, In Progress`
 - `tracker.terminal_states`: list/string, default `Closed, Cancelled, Canceled, Duplicate, Done`
 - `polling.interval_ms`: integer, default `30000`
@@ -1052,7 +1065,7 @@ Unsupported dynamic tool calls:
 Optional client-side tool extension:
 
 - An implementation may expose a limited set of client-side tools to the app-server session.
-- Current optional standardized tool: `linear_graphql`.
+- Current optional standardized tools: `linear_graphql`, `org_task`.
 - If implemented, supported tools should be advertised to the app-server session during startup
   using the protocol mechanism supported by the targeted Codex app-server version.
 - Unsupported tool names should still return a failure result and continue the session.
@@ -1089,6 +1102,27 @@ Optional client-side tool extension:
   - invalid input, missing auth, or transport failure -> `success=false` with an error payload
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
+
+`org_task` extension contract:
+
+- Purpose: read or update the current Org mode task and its `Codex Workpad` child heading using
+  Symphony's configured tracker access.
+- Availability: only meaningful when `tracker.kind == "orgmode"` and valid Org tracker config is
+  present.
+- Preferred input shape:
+
+  ```json
+  {
+    "action": "get_task | set_state | get_workpad | replace_workpad",
+    "taskId": "optional current task override",
+    "state": "required for set_state",
+    "content": "required for replace_workpad"
+  }
+  ```
+
+- `taskId` may be omitted when the session already identifies the current task.
+- `set_state` must apply the configured `tracker.state_map`.
+- `replace_workpad` must replace only the workpad section content, not unrelated task content.
 
 Illustrative responses (equivalent payload shapes are acceptable if they preserve the same outcome):
 
@@ -1140,7 +1174,7 @@ Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
-## 11. Issue Tracker Integration Contract (Linear-Compatible)
+## 11. Issue Tracker Integration Contract
 
 ### 11.1 Required Operations
 

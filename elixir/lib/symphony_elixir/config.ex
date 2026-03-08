@@ -9,8 +9,20 @@ defmodule SymphonyElixir.Config do
   @default_active_states ["Todo", "In Progress"]
   @default_terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   @default_linear_endpoint "https://api.linear.app/graphql"
+  @default_org_emacsclient_command "emacsclient -a emacs"
+  @default_org_state_map %{
+    "BACKLOG" => "Backlog",
+    "TODO" => "Todo",
+    "IN_PROGRESS" => "In Progress",
+    "HUMAN_REVIEW" => "Human Review",
+    "MERGING" => "Merging",
+    "REWORK" => "Rework",
+    "DONE" => "Done",
+    "CANCELLED" => "Cancelled",
+    "DUPLICATE" => "Duplicate"
+  }
   @default_prompt_template """
-  You are working on a Linear issue.
+  You are working on a tracked issue.
 
   Identifier: {{ issue.identifier }}
   Title: {{ issue.title }}
@@ -21,7 +33,15 @@ defmodule SymphonyElixir.Config do
   {% else %}
   No description provided.
   {% endif %}
+
+  Current Workpad:
+  {% if workpad %}
+  {{ workpad }}
+  {% else %}
+  No workpad provided.
+  {% endif %}
   """
+  @default_execution_kind "local"
   @default_poll_interval_ms 30_000
   @default_workspace_root Path.join(System.tmp_dir!(), "symphony_workspaces")
   @default_hook_timeout_ms 60_000
@@ -32,6 +52,20 @@ defmodule SymphonyElixir.Config do
   @default_codex_turn_timeout_ms 3_600_000
   @default_codex_read_timeout_ms 5_000
   @default_codex_stall_timeout_ms 300_000
+  @default_temporal_helper_command "go run ./temporal/cmd/symphony"
+  @default_temporal_address "localhost:7233"
+  @default_temporal_namespace "default"
+  @default_temporal_task_queue "symphony"
+  @default_temporal_status_poll_ms 5_000
+  @default_k3s_namespace "symphony"
+  @default_k3s_image "symphony/agent:latest"
+  @default_k3s_project_root Path.join(System.tmp_dir!(), "symphony_projects")
+  @default_k3s_shared_cache_root Path.join(System.tmp_dir!(), "symphony_shared")
+  @default_k3s_ttl_seconds_after_finished 86_400
+  @default_k3s_default_cpu "2"
+  @default_k3s_default_memory "8Gi"
+  @default_k3s_default_gpu_count 0
+  @default_repository_default_branch "main"
   @default_codex_approval_policy %{
     "reject" => %{
       "sandbox_approval" => true,
@@ -54,6 +88,16 @@ defmodule SymphonyElixir.Config do
                                  api_key: [type: {:or, [:string, nil]}, default: nil],
                                  project_slug: [type: {:or, [:string, nil]}, default: nil],
                                  assignee: [type: {:or, [:string, nil]}, default: nil],
+                                 file: [type: {:or, [:string, nil]}, default: nil],
+                                 root_id: [type: {:or, [:string, nil]}, default: nil],
+                                 emacsclient_command: [
+                                   type: :string,
+                                   default: @default_org_emacsclient_command
+                                 ],
+                                 state_map: [
+                                   type: {:map, :string, :string},
+                                   default: @default_org_state_map
+                                 ],
                                  active_states: [
                                    type: {:list, :string},
                                    default: @default_active_states
@@ -69,6 +113,60 @@ defmodule SymphonyElixir.Config do
                                default: %{},
                                keys: [
                                  interval_ms: [type: :integer, default: @default_poll_interval_ms]
+                               ]
+                             ],
+                             execution: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 kind: [type: :string, default: @default_execution_kind]
+                               ]
+                             ],
+                             temporal: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 helper_command: [
+                                   type: :string,
+                                   default: @default_temporal_helper_command
+                                 ],
+                                 address: [type: :string, default: @default_temporal_address],
+                                 namespace: [type: :string, default: @default_temporal_namespace],
+                                 task_queue: [type: :string, default: @default_temporal_task_queue],
+                                 status_poll_ms: [
+                                   type: :pos_integer,
+                                   default: @default_temporal_status_poll_ms
+                                 ]
+                               ]
+                             ],
+                             k3s: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 namespace: [type: :string, default: @default_k3s_namespace],
+                                 image: [type: :string, default: @default_k3s_image],
+                                 project_root: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_k3s_project_root
+                                 ],
+                                 shared_cache_root: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_k3s_shared_cache_root
+                                 ],
+                                 ttl_seconds_after_finished: [
+                                   type: :non_neg_integer,
+                                   default: @default_k3s_ttl_seconds_after_finished
+                                 ],
+                                 default_cpu: [type: :string, default: @default_k3s_default_cpu],
+                                 default_memory: [
+                                   type: :string,
+                                   default: @default_k3s_default_memory
+                                 ],
+                                 default_gpu_count: [
+                                   type: :non_neg_integer,
+                                   default: @default_k3s_default_gpu_count
+                                 ],
+                                 runtime_class: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
                              workspace: [
@@ -155,6 +253,17 @@ defmodule SymphonyElixir.Config do
                                  port: [type: {:or, [:non_neg_integer, nil]}, default: nil],
                                  host: [type: :string, default: @default_server_host]
                                ]
+                             ],
+                             repository: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 origin_url: [type: {:or, [:string, nil]}, default: nil],
+                                 default_branch: [
+                                   type: :string,
+                                   default: @default_repository_default_branch
+                                 ]
+                               ]
                              ]
                            )
 
@@ -209,19 +318,140 @@ defmodule SymphonyElixir.Config do
     |> normalize_secret_value()
   end
 
+  @spec org_file() :: Path.t() | nil
+  def org_file do
+    validated_workflow_options()
+    |> get_in([:tracker, :file])
+    |> resolve_path_value(nil)
+  end
+
+  @spec org_root_id() :: String.t() | nil
+  def org_root_id do
+    get_in(validated_workflow_options(), [:tracker, :root_id])
+  end
+
+  @spec org_emacsclient_command() :: String.t()
+  def org_emacsclient_command do
+    get_in(validated_workflow_options(), [:tracker, :emacsclient_command])
+  end
+
+  @spec org_state_map() :: %{optional(String.t()) => String.t()}
+  def org_state_map do
+    get_in(validated_workflow_options(), [:tracker, :state_map])
+  end
+
+  @spec tracker_active_states() :: [String.t()]
+  def tracker_active_states do
+    get_in(validated_workflow_options(), [:tracker, :active_states])
+  end
+
+  @spec tracker_terminal_states() :: [String.t()]
+  def tracker_terminal_states do
+    get_in(validated_workflow_options(), [:tracker, :terminal_states])
+  end
+
   @spec linear_active_states() :: [String.t()]
   def linear_active_states do
-    get_in(validated_workflow_options(), [:tracker, :active_states])
+    tracker_active_states()
   end
 
   @spec linear_terminal_states() :: [String.t()]
   def linear_terminal_states do
-    get_in(validated_workflow_options(), [:tracker, :terminal_states])
+    tracker_terminal_states()
   end
 
   @spec poll_interval_ms() :: pos_integer()
   def poll_interval_ms do
     get_in(validated_workflow_options(), [:polling, :interval_ms])
+  end
+
+  @spec execution_kind() :: String.t()
+  def execution_kind do
+    get_in(validated_workflow_options(), [:execution, :kind])
+  end
+
+  @spec temporal_helper_command() :: String.t()
+  def temporal_helper_command do
+    get_in(validated_workflow_options(), [:temporal, :helper_command])
+  end
+
+  @spec temporal_address() :: String.t()
+  def temporal_address do
+    get_in(validated_workflow_options(), [:temporal, :address])
+  end
+
+  @spec temporal_namespace() :: String.t()
+  def temporal_namespace do
+    get_in(validated_workflow_options(), [:temporal, :namespace])
+  end
+
+  @spec temporal_task_queue() :: String.t()
+  def temporal_task_queue do
+    get_in(validated_workflow_options(), [:temporal, :task_queue])
+  end
+
+  @spec temporal_status_poll_ms() :: pos_integer()
+  def temporal_status_poll_ms do
+    get_in(validated_workflow_options(), [:temporal, :status_poll_ms])
+  end
+
+  @spec k3s_namespace() :: String.t()
+  def k3s_namespace do
+    get_in(validated_workflow_options(), [:k3s, :namespace])
+  end
+
+  @spec k3s_image() :: String.t()
+  def k3s_image do
+    get_in(validated_workflow_options(), [:k3s, :image])
+  end
+
+  @spec k3s_project_root() :: Path.t()
+  def k3s_project_root do
+    validated_workflow_options()
+    |> get_in([:k3s, :project_root])
+    |> resolve_path_value(@default_k3s_project_root)
+  end
+
+  @spec k3s_shared_cache_root() :: Path.t()
+  def k3s_shared_cache_root do
+    validated_workflow_options()
+    |> get_in([:k3s, :shared_cache_root])
+    |> resolve_path_value(@default_k3s_shared_cache_root)
+  end
+
+  @spec k3s_ttl_seconds_after_finished() :: non_neg_integer()
+  def k3s_ttl_seconds_after_finished do
+    get_in(validated_workflow_options(), [:k3s, :ttl_seconds_after_finished])
+  end
+
+  @spec k3s_default_cpu() :: String.t()
+  def k3s_default_cpu do
+    get_in(validated_workflow_options(), [:k3s, :default_cpu])
+  end
+
+  @spec k3s_default_memory() :: String.t()
+  def k3s_default_memory do
+    get_in(validated_workflow_options(), [:k3s, :default_memory])
+  end
+
+  @spec k3s_default_gpu_count() :: non_neg_integer()
+  def k3s_default_gpu_count do
+    get_in(validated_workflow_options(), [:k3s, :default_gpu_count])
+  end
+
+  @spec k3s_runtime_class() :: String.t() | nil
+  def k3s_runtime_class do
+    get_in(validated_workflow_options(), [:k3s, :runtime_class])
+  end
+
+  @spec repository_origin_url() :: String.t() | nil
+  def repository_origin_url do
+    get_in(validated_workflow_options(), [:repository, :origin_url])
+  end
+
+  @spec repository_default_branch() :: String.t()
+  def repository_default_branch do
+    get_in(validated_workflow_options(), [:repository, :default_branch])
   end
 
   @spec workspace_root() :: Path.t()
@@ -365,8 +595,14 @@ defmodule SymphonyElixir.Config do
   def validate! do
     with {:ok, _workflow} <- current_workflow(),
          :ok <- require_tracker_kind(),
+         :ok <- require_execution_kind(),
          :ok <- require_linear_token(),
          :ok <- require_linear_project(),
+         :ok <- require_org_file(),
+         :ok <- require_org_root_id(),
+         :ok <- require_org_emacsclient_command(),
+         :ok <- require_temporal_helper_command(),
+         :ok <- require_repository_origin_url(),
          :ok <- require_valid_codex_runtime_settings() do
       require_codex_command()
     end
@@ -390,8 +626,17 @@ defmodule SymphonyElixir.Config do
     case tracker_kind() do
       "linear" -> :ok
       "memory" -> :ok
+      "orgmode" -> :ok
       nil -> {:error, :missing_tracker_kind}
       other -> {:error, {:unsupported_tracker_kind, other}}
+    end
+  end
+
+  defp require_execution_kind do
+    case execution_kind() do
+      "local" -> :ok
+      "temporal_k3s" -> :ok
+      other -> {:error, {:unsupported_execution_kind, other}}
     end
   end
 
@@ -423,11 +668,81 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  defp require_org_file do
+    case tracker_kind() do
+      "orgmode" ->
+        if is_binary(org_file()) do
+          :ok
+        else
+          {:error, :missing_org_tracker_file}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp require_org_root_id do
+    case tracker_kind() do
+      "orgmode" ->
+        if is_binary(org_root_id()) do
+          :ok
+        else
+          {:error, :missing_org_tracker_root_id}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp require_org_emacsclient_command do
+    case tracker_kind() do
+      "orgmode" ->
+        if org_emacsclient_available?() do
+          :ok
+        else
+          {:error, :missing_org_emacsclient}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
   defp require_codex_command do
     if byte_size(String.trim(codex_command())) > 0 do
       :ok
     else
       {:error, :missing_codex_command}
+    end
+  end
+
+  defp require_temporal_helper_command do
+    case execution_kind() do
+      "temporal_k3s" ->
+        if temporal_helper_command() |> String.trim() |> byte_size() > 0 do
+          :ok
+        else
+          {:error, :missing_temporal_helper_command}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp require_repository_origin_url do
+    case execution_kind() do
+      "temporal_k3s" ->
+        if is_binary(repository_origin_url()) and String.trim(repository_origin_url()) != "" do
+          :ok
+        else
+          {:error, :missing_repository_origin_url}
+        end
+
+      _ ->
+        :ok
     end
   end
 
@@ -448,12 +763,16 @@ defmodule SymphonyElixir.Config do
     %{
       tracker: extract_tracker_options(section_map(config, "tracker")),
       polling: extract_polling_options(section_map(config, "polling")),
+      execution: extract_execution_options(section_map(config, "execution")),
+      temporal: extract_temporal_options(section_map(config, "temporal")),
+      k3s: extract_k3s_options(section_map(config, "k3s")),
       workspace: extract_workspace_options(section_map(config, "workspace")),
       agent: extract_agent_options(section_map(config, "agent")),
       codex: extract_codex_options(section_map(config, "codex")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       observability: extract_observability_options(section_map(config, "observability")),
-      server: extract_server_options(section_map(config, "server"))
+      server: extract_server_options(section_map(config, "server")),
+      repository: extract_repository_options(section_map(config, "repository"))
     }
   end
 
@@ -463,6 +782,11 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:endpoint, scalar_string_value(Map.get(section, "endpoint")))
     |> put_if_present(:api_key, binary_value(Map.get(section, "api_key"), allow_empty: true))
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
+    |> put_if_present(:assignee, scalar_string_value(Map.get(section, "assignee")))
+    |> put_if_present(:file, binary_value(Map.get(section, "file")))
+    |> put_if_present(:root_id, scalar_string_value(Map.get(section, "root_id")))
+    |> put_if_present(:emacsclient_command, command_value(Map.get(section, "emacsclient_command")))
+    |> put_if_present(:state_map, string_map_value(Map.get(section, "state_map")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
   end
@@ -470,6 +794,36 @@ defmodule SymphonyElixir.Config do
   defp extract_polling_options(section) do
     %{}
     |> put_if_present(:interval_ms, integer_value(Map.get(section, "interval_ms")))
+  end
+
+  defp extract_execution_options(section) do
+    %{}
+    |> put_if_present(:kind, normalize_execution_kind(scalar_string_value(Map.get(section, "kind"))))
+  end
+
+  defp extract_temporal_options(section) do
+    %{}
+    |> put_if_present(:helper_command, command_value(Map.get(section, "helper_command")))
+    |> put_if_present(:address, scalar_string_value(Map.get(section, "address")))
+    |> put_if_present(:namespace, scalar_string_value(Map.get(section, "namespace")))
+    |> put_if_present(:task_queue, scalar_string_value(Map.get(section, "task_queue")))
+    |> put_if_present(:status_poll_ms, positive_integer_value(Map.get(section, "status_poll_ms")))
+  end
+
+  defp extract_k3s_options(section) do
+    %{}
+    |> put_if_present(:namespace, scalar_string_value(Map.get(section, "namespace")))
+    |> put_if_present(:image, scalar_string_value(Map.get(section, "image")))
+    |> put_if_present(:project_root, binary_value(Map.get(section, "project_root")))
+    |> put_if_present(:shared_cache_root, binary_value(Map.get(section, "shared_cache_root")))
+    |> put_if_present(
+      :ttl_seconds_after_finished,
+      non_negative_integer_value(Map.get(section, "ttl_seconds_after_finished"))
+    )
+    |> put_if_present(:default_cpu, scalar_string_value(Map.get(section, "default_cpu")))
+    |> put_if_present(:default_memory, scalar_string_value(Map.get(section, "default_memory")))
+    |> put_if_present(:default_gpu_count, non_negative_integer_value(Map.get(section, "default_gpu_count")))
+    |> put_if_present(:runtime_class, scalar_string_value(Map.get(section, "runtime_class")))
   end
 
   defp extract_workspace_options(section) do
@@ -516,6 +870,12 @@ defmodule SymphonyElixir.Config do
     %{}
     |> put_if_present(:port, non_negative_integer_value(Map.get(section, "port")))
     |> put_if_present(:host, scalar_string_value(Map.get(section, "host")))
+  end
+
+  defp extract_repository_options(section) do
+    %{}
+    |> put_if_present(:origin_url, scalar_string_value(Map.get(section, "origin_url")))
+    |> put_if_present(:default_branch, scalar_string_value(Map.get(section, "default_branch")))
   end
 
   defp section_map(config, key) do
@@ -659,6 +1019,24 @@ defmodule SymphonyElixir.Config do
 
   defp state_limits_value(_value), do: :omit
 
+  defp string_map_value(value) when is_map(value) do
+    value
+    |> Enum.reduce(%{}, fn {key, map_value}, acc ->
+      case {scalar_string_value(key), scalar_string_value(map_value)} do
+        {:omit, _} ->
+          acc
+
+        {_, :omit} ->
+          acc
+
+        {normalized_key, normalized_value} ->
+          Map.put(acc, String.trim(normalized_key), String.trim(normalized_value))
+      end
+    end)
+  end
+
+  defp string_map_value(_value), do: :omit
+
   defp parse_integer(value) when is_integer(value), do: {:ok, value}
 
   defp parse_integer(value) when is_binary(value) do
@@ -785,12 +1163,23 @@ defmodule SymphonyElixir.Config do
     |> String.trim()
     |> String.downcase()
     |> case do
+      "org" -> "orgmode"
       "" -> nil
       normalized -> normalized
     end
   end
 
   defp normalize_tracker_kind(_kind), do: nil
+
+  defp normalize_execution_kind(kind) when is_binary(kind) do
+    case kind |> String.trim() |> String.downcase() do
+      "" -> :omit
+      "temporal" -> "temporal_k3s"
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_execution_kind(_kind), do: :omit
 
   defp workflow_config do
     case current_workflow() do
@@ -935,4 +1324,30 @@ defmodule SymphonyElixir.Config do
   end
 
   defp normalize_secret_value(_value), do: nil
+
+  defp org_emacsclient_available? do
+    case OptionParser.split(org_emacsclient_command()) do
+      [command | _args] ->
+        org_emacsclient_command_path?(command)
+
+      _ ->
+        false
+    end
+  rescue
+    _error ->
+      false
+  end
+
+  defp org_emacsclient_command_path?(command) when is_binary(command) do
+    cond do
+      command == "" ->
+        false
+
+      String.contains?(command, "/") ->
+        File.exists?(command)
+
+      true ->
+        not is_nil(System.find_executable(command))
+    end
+  end
 end

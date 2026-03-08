@@ -5,6 +5,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.LiveViewTest
 
   alias SymphonyElixir.Linear.Adapter
+  alias SymphonyElixir.Org.Adapter, as: OrgAdapter
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -36,6 +37,43 @@ defmodule SymphonyElixir.ExtensionsTest do
         _ ->
           Process.get({__MODULE__, :graphql_result})
       end
+    end
+  end
+
+  defmodule FakeOrgClient do
+    def fetch_candidate_issues do
+      send(self(), :org_fetch_candidate_issues_called)
+      {:ok, [:org_candidate]}
+    end
+
+    def fetch_issues_by_states(states) do
+      send(self(), {:org_fetch_issues_by_states_called, states})
+      {:ok, states}
+    end
+
+    def fetch_issue_states_by_ids(issue_ids) do
+      send(self(), {:org_fetch_issue_states_by_ids_called, issue_ids})
+      {:ok, issue_ids}
+    end
+
+    def get_task(issue_id) do
+      send(self(), {:org_get_task_called, issue_id})
+      {:ok, %{id: issue_id}}
+    end
+
+    def get_workpad(issue_id) do
+      send(self(), {:org_get_workpad_called, issue_id})
+      {:ok, "workpad for #{issue_id}"}
+    end
+
+    def replace_workpad(issue_id, body) do
+      send(self(), {:org_replace_workpad_called, issue_id, body})
+      {:ok, body}
+    end
+
+    def set_task_state(issue_id, state_name) do
+      send(self(), {:org_set_task_state_called, issue_id, state_name})
+      {:ok, %{id: issue_id, state: state_name}}
     end
   end
 
@@ -79,12 +117,19 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   setup do
     linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
+    org_client_module = Application.get_env(:symphony_elixir, :org_client_module)
 
     on_exit(fn ->
       if is_nil(linear_client_module) do
         Application.delete_env(:symphony_elixir, :linear_client_module)
       else
         Application.put_env(:symphony_elixir, :linear_client_module, linear_client_module)
+      end
+
+      if is_nil(org_client_module) do
+        Application.delete_env(:symphony_elixir, :org_client_module)
+      else
+        Application.put_env(:symphony_elixir, :org_client_module, org_client_module)
       end
     end)
 
@@ -203,6 +248,43 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
+  end
+
+  test "tracker delegates to the org adapter" do
+    Application.put_env(:symphony_elixir, :org_client_module, FakeOrgClient)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/bin/sh"
+    )
+
+    assert Config.tracker_kind() == "orgmode"
+    assert SymphonyElixir.Tracker.adapter() == OrgAdapter
+    assert {:ok, [:org_candidate]} = SymphonyElixir.Tracker.fetch_candidate_issues()
+    assert_receive :org_fetch_candidate_issues_called
+
+    assert {:ok, ["Todo"]} = SymphonyElixir.Tracker.fetch_issues_by_states(["Todo"])
+    assert_receive {:org_fetch_issues_by_states_called, ["Todo"]}
+
+    assert {:ok, ["issue-1"]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
+    assert_receive {:org_fetch_issue_states_by_ids_called, ["issue-1"]}
+
+    assert :ok = OrgAdapter.create_comment("issue-1", "workpad body")
+    assert_receive {:org_replace_workpad_called, "issue-1", "workpad body"}
+
+    assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
+    assert_receive {:org_set_task_state_called, "issue-1", "Done"}
+
+    assert {:ok, %{id: "issue-1"}} = OrgAdapter.get_task("issue-1")
+    assert_receive {:org_get_task_called, "issue-1"}
+
+    assert {:ok, "workpad for issue-1"} = OrgAdapter.get_workpad("issue-1")
+    assert_receive {:org_get_workpad_called, "issue-1"}
+
+    assert {:ok, "replacement"} = OrgAdapter.replace_workpad("issue-1", "replacement")
+    assert_receive {:org_replace_workpad_called, "issue-1", "replacement"}
   end
 
   test "linear adapter delegates reads and validates mutation responses" do

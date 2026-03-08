@@ -13,15 +13,11 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 ## How it works
 
-1. Polls Linear for candidate work
-2. Creates an isolated workspace per issue
-3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
-   workspace
-4. Sends a workflow prompt to Codex
-5. Keeps Codex working on the issue until the work is done
-
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+1. Polls the configured tracker for candidate work
+2. Renders a repo-owned prompt plus the current Org workpad snapshot
+3. Starts or resumes a Temporal workflow for the task
+4. Runs Codex inside a K3s job backed by a stable per-task project workspace
+5. Syncs `.symphony/workpad.md` and `.symphony/run-result.json` back into Org
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -30,18 +26,14 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
-   set it as the `LINEAR_API_KEY` environment variable.
+2. Choose an Org file and subtree to act as the tracker, then set `SYMPHONY_ORG_FILE` and
+   `SYMPHONY_ORG_ROOT_ID`.
 3. Copy this directory's `WORKFLOW.md` to your repo.
-4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
-     operations such as comment editing or upload flows.
+4. Optionally copy the `commit`, `push`, `pull`, and `land` skills to your repo.
 5. Customize the copied `WORKFLOW.md` file for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+   - The default workflow expects Org TODO keywords that map to `Backlog`, `Todo`, `In Progress`,
+     `Human Review`, `Merging`, `Rework`, and `Done`.
+   - Set `tracker.file`, `tracker.root_id`, and `tracker.state_map` to match your Org layout.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -57,12 +49,15 @@ mise exec -- elixir --version
 
 ```bash
 git clone https://github.com/openai/symphony
-cd symphony/elixir
+cd symphony
 mise trust
 mise install
+cd elixir
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+cd ..
+go run ./temporal/cmd/worker &
+mise exec -- ./elixir/bin/symphony ./elixir/WORKFLOW.md
 ```
 
 ## Configuration
@@ -88,28 +83,29 @@ Minimal example:
 ```md
 ---
 tracker:
-  kind: linear
-  project_slug: "..."
-workspace:
-  root: ~/code/workspaces
-hooks:
-  after_create: |
-    git clone git@github.com:your-org/your-repo.git .
-agent:
-  max_concurrent_agents: 10
-  max_turns: 20
+  kind: orgmode
+  file: "$SYMPHONY_ORG_FILE"
+  root_id: "$SYMPHONY_ORG_ROOT_ID"
+execution:
+  kind: temporal_k3s
+temporal:
+  helper_command: "go run ./temporal/cmd/symphony"
+repository:
+  origin_url: "https://github.com/your-org/your-repo.git"
 codex:
-  command: codex app-server
+  command: codex exec --full-auto --json
 ---
 
-You are working on a Linear issue {{ issue.identifier }}.
-
-Title: {{ issue.title }} Body: {{ issue.description }}
+You are working on an Org task {{ issue.identifier }}.
+Keep progress in ./.symphony/workpad.md and emit ./.symphony/run-result.json before exit.
 ```
 
 Notes:
 
 - If a value is missing, defaults are used.
+- `execution.kind: temporal_k3s` enables the new remote backend; `local` keeps the original host-local runner.
+- The remote backend requires a Temporal helper command plus `repository.origin_url`.
+- The shipped remote workflow does not rely on `org_task`; Org updates are applied by Symphony after the job completes.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -122,26 +118,28 @@ Notes:
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
-- Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
-  `git clone ... .` there, along with any other setup commands you need.
-- If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
-  the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
-- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.file` resolves `$VAR` before path handling, so env-backed file paths are supported.
+- `tracker.root_id` is the Org `ID` of the parent heading that contains Symphony-managed tasks.
+- `tracker.state_map` maps Org TODO keywords such as `IN_PROGRESS` to display states such as
+  `In Progress`.
+- `tracker.api_key` still reads from `LINEAR_API_KEY` when `tracker.kind: linear` is used.
 - For path values, `~` is expanded to the home directory.
-- For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
-  while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
-  launched shell.
+- For env-backed path values, use `$VAR`. `k3s.project_root`, `k3s.shared_cache_root`, and `workspace.root`
+  resolve `$VAR` before path handling, while `codex.command` stays a shell command string.
 
 ```yaml
 tracker:
-  api_key: $LINEAR_API_KEY
-workspace:
-  root: $SYMPHONY_WORKSPACE_ROOT
-hooks:
-  after_create: |
-    git clone --depth 1 "$SOURCE_REPO_URL" .
+  file: $SYMPHONY_ORG_FILE
+  root_id: $SYMPHONY_ORG_ROOT_ID
+execution:
+  kind: temporal_k3s
+repository:
+  origin_url: $SOURCE_REPO_URL
+k3s:
+  project_root: $SYMPHONY_K3S_PROJECT_ROOT
+  shared_cache_root: $SYMPHONY_K3S_SHARED_CACHE_ROOT
 codex:
-  command: "$CODEX_BIN app-server --model gpt-5.3-codex"
+  command: "$CODEX_BIN exec --full-auto --json"
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML, startup and scheduling are halted until fixed.
@@ -161,7 +159,9 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `WORKFLOW.md`: in-repo workflow contract used by local runs
+- `WORKFLOW.md`: in-repo workflow contract used by local and remote runs
+- `../temporal/`: Go Temporal helper and worker used by the remote backend
+- `../k3s/`: K3s templates and launch scripts for remote agent jobs
 - `../.codex/`: repository-local Codex skills and setup helpers
 
 ## Testing

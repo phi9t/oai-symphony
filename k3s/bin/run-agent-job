@@ -1,0 +1,65 @@
+#!/bin/bash
+
+set -eu -o pipefail
+
+: "${PROMPT_PATH:?PROMPT_PATH is required}"
+: "${WORKPAD_PATH:?WORKPAD_PATH is required}"
+: "${RESULT_PATH:?RESULT_PATH is required}"
+: "${REPOSITORY_ORIGIN_URL:?REPOSITORY_ORIGIN_URL is required}"
+: "${REPOSITORY_DEFAULT_BRANCH:=main}"
+: "${WORKSPACE_PATH:?WORKSPACE_PATH is required}"
+: "${CODEX_COMMAND:=codex exec --full-auto --json}"
+
+mkdir -p "$(dirname "${WORKPAD_PATH}")"
+mkdir -p "$(dirname "${RESULT_PATH}")"
+mkdir -p "${WORKSPACE_PATH}"
+
+if [[ ! -d "${WORKSPACE_PATH}/.git" ]]; then
+    git clone --depth 1 --branch "${REPOSITORY_DEFAULT_BRANCH}" "${REPOSITORY_ORIGIN_URL}" "${WORKSPACE_PATH}"
+else
+    git -C "${WORKSPACE_PATH}" fetch origin "${REPOSITORY_DEFAULT_BRANCH}" --depth 1 || true
+fi
+
+if [[ ! -f "${WORKPAD_PATH}" ]]; then
+    cat > "${WORKPAD_PATH}" <<'EOF'
+### Environment
+`<host>:<abs-workdir>@<unknown-sha>`
+
+### Plan
+- [ ] Update this plan before making changes
+
+### Acceptance Criteria
+- [ ] Record acceptance criteria here
+
+### Validation
+- [ ] Record validation here
+
+### Notes
+- Created by run-agent-job
+EOF
+fi
+
+cd "${WORKSPACE_PATH}"
+
+export PROMPT_CONTENT="$(cat "${PROMPT_PATH}")"
+
+set +e
+sh -lc "${CODEX_COMMAND} \"\$PROMPT_CONTENT\"" > ".symphony/codex-output.jsonl" 2>&1
+status=$?
+set -e
+
+if [[ ! -f "${RESULT_PATH}" ]]; then
+    if [[ ${status} -eq 0 ]]; then
+        target_state="Human Review"
+        blocked_reason="null"
+    else
+        target_state="Rework"
+        blocked_reason="\"codex command failed with exit ${status}\""
+    fi
+
+    cat > "${RESULT_PATH}" <<EOF
+{"status":"$( [[ ${status} -eq 0 ]] && echo succeeded || echo failed )","targetState":"${target_state}","summary":"Codex run completed with exit ${status}.","validation":[],"blockedReason":${blocked_reason},"needsContinuation":false}
+EOF
+fi
+
+exit ${status}

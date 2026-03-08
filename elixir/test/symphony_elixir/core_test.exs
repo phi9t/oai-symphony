@@ -71,6 +71,100 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "orgmode config requires file, root id, and an available emacsclient command" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: nil,
+      tracker_root_id: nil,
+      tracker_emacsclient_command: "/definitely/missing/emacsclient"
+    )
+
+    assert {:error, :missing_org_tracker_file} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: nil,
+      tracker_emacsclient_command: "/definitely/missing/emacsclient"
+    )
+
+    assert {:error, :missing_org_tracker_root_id} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/definitely/missing/emacsclient"
+    )
+
+    assert {:error, :missing_org_emacsclient} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "$SYMPHONY_TEST_ORG_FILE",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/bin/sh",
+      tracker_state_map: %{"TODO" => "Todo", "IN_PROGRESS" => "In Progress"}
+    )
+
+    previous_org_file = System.get_env("SYMPHONY_TEST_ORG_FILE")
+    on_exit(fn -> restore_env("SYMPHONY_TEST_ORG_FILE", previous_org_file) end)
+    System.put_env("SYMPHONY_TEST_ORG_FILE", "/tmp/test-tasks.org")
+
+    assert Config.org_file() == "/tmp/test-tasks.org"
+    assert Config.org_root_id() == "ROOT-1"
+    assert Config.org_emacsclient_command() == "/bin/sh"
+    assert Config.org_state_map() == %{"TODO" => "Todo", "IN_PROGRESS" => "In Progress"}
+    assert :ok = Config.validate!()
+  end
+
+  test "temporal_k3s config requires repository origin url and exposes remote settings" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/bin/sh",
+      execution_kind: "temporal",
+      repository_origin_url: nil
+    )
+
+    assert Config.execution_kind() == "temporal_k3s"
+    assert {:error, :missing_repository_origin_url} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/bin/sh",
+      execution_kind: "temporal_k3s",
+      temporal_helper_command: "go run ./temporal/cmd/symphony",
+      repository_origin_url: "https://example.com/repo.git",
+      repository_default_branch: "trunk",
+      k3s_project_root: "/tmp/symphony-projects",
+      k3s_shared_cache_root: "/tmp/symphony-cache"
+    )
+
+    assert Config.execution_kind() == "temporal_k3s"
+    assert Config.temporal_helper_command() == "go run ./temporal/cmd/symphony"
+    assert Config.repository_origin_url() == "https://example.com/repo.git"
+    assert Config.repository_default_branch() == "trunk"
+    assert Config.k3s_project_root() == "/tmp/symphony-projects"
+    assert Config.k3s_shared_cache_root() == "/tmp/symphony-cache"
+    assert :ok = Config.validate!()
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
@@ -81,16 +175,28 @@ defmodule SymphonyElixir.CoreTest do
 
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
-    assert Map.get(tracker, "kind") == "linear"
-    assert is_binary(Map.get(tracker, "project_slug"))
+    assert Map.get(tracker, "kind") == "orgmode"
+    assert is_binary(Map.get(tracker, "file"))
+    assert is_binary(Map.get(tracker, "root_id"))
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
+    assert is_map(Map.get(tracker, "state_map"))
+
+    execution = Map.get(config, "execution", %{})
+    assert is_map(execution)
+    assert Map.get(execution, "kind") == "temporal_k3s"
+
+    temporal = Map.get(config, "temporal", %{})
+    assert is_map(temporal)
+    assert is_binary(Map.get(temporal, "helper_command"))
+
+    repository = Map.get(config, "repository", %{})
+    assert is_map(repository)
+    assert is_binary(Map.get(repository, "origin_url"))
+    assert is_binary(Map.get(repository, "default_branch"))
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
-    assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
-    assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
 
     assert String.trim(prompt) != ""
@@ -668,7 +774,7 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue)
 
-    assert prompt =~ "You are working on a Linear issue."
+    assert prompt =~ "You are working on a tracked issue."
     assert prompt =~ "Identifier: MT-777"
     assert prompt =~ "Title: Make fallback prompt useful"
     assert prompt =~ "Body:"
@@ -744,17 +850,17 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
+    assert prompt =~ "You are working on an Org task `MT-616`"
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
     assert prompt =~ "Current status: In Progress"
     assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
     assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true blocker"
-    assert prompt =~ "Do not include \"next steps for user\""
-    assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
-    assert prompt =~ "Do not call `gh pr merge` directly"
+    assert prompt =~ "The control plane owns Org updates."
+    assert prompt =~ "./.symphony/workpad.md"
+    assert prompt =~ "./.symphony/run-result.json"
+    assert prompt =~ "targetState"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt #2"
   end

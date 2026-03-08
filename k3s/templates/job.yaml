@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: symphony-job-${PROJECT_ID}-${JOB_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: symphony
+    symphony/project-id: "${PROJECT_ID}"
+    symphony/job-name: "${JOB_NAME}"
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: symphony
+        symphony/project-id: "${PROJECT_ID}"
+        symphony/job-name: "${JOB_NAME}"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: agent
+          image: "${IMAGE}"
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "${CPU_REQUEST}"
+              memory: "${MEMORY_REQUEST}"
+            limits:
+              cpu: "${CPU_REQUEST}"
+              memory: "${MEMORY_REQUEST}"
+          command: ["/bin/bash", "-lc", "${JOB_COMMAND}"]
+          workingDir: /workspace
+          volumeMounts:
+            - name: project-home
+              mountPath: /home/symphony
+            - name: project-config
+              mountPath: /home/symphony/.config
+            - name: project-workspace
+              mountPath: /workspace
+            - name: project-outputs
+              mountPath: /outputs
+            - name: shared-cache
+              mountPath: /cache
+            - name: symphony-repo
+              mountPath: /opt/symphony
+              readOnly: true
+      volumes:
+        - name: project-home
+          hostPath:
+            path: ${PROJECT_ROOT}/home
+            type: DirectoryOrCreate
+        - name: project-config
+          hostPath:
+            path: ${PROJECT_ROOT}/config
+            type: DirectoryOrCreate
+        - name: project-workspace
+          hostPath:
+            path: ${PROJECT_ROOT}/workspace
+            type: DirectoryOrCreate
+        - name: project-outputs
+          hostPath:
+            path: ${PROJECT_ROOT}/outputs
+            type: DirectoryOrCreate
+        - name: shared-cache
+          hostPath:
+            path: ${SHARED_CACHE_ROOT}
+            type: DirectoryOrCreate
+        - name: symphony-repo
+          hostPath:
+            path: ${REPO_ROOT}
+            type: Directory

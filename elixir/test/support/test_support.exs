@@ -12,11 +12,11 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Config
       alias SymphonyElixir.HttpServer
       alias SymphonyElixir.Linear.Client
-      alias SymphonyElixir.Linear.Issue
       alias SymphonyElixir.Orchestrator
       alias SymphonyElixir.PromptBuilder
       alias SymphonyElixir.StatusDashboard
       alias SymphonyElixir.Tracker
+      alias SymphonyElixir.Tracker.Issue
       alias SymphonyElixir.Workflow
       alias SymphonyElixir.WorkflowStore
       alias SymphonyElixir.Workspace
@@ -97,9 +97,30 @@ defmodule SymphonyElixir.TestSupport do
           tracker_api_token: "token",
           tracker_project_slug: "project",
           tracker_assignee: nil,
+          tracker_file: nil,
+          tracker_root_id: nil,
+          tracker_emacsclient_command: "emacsclient -a emacs",
+          tracker_state_map: nil,
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
+          execution_kind: "local",
+          temporal_helper_command: "go run ./temporal/cmd/symphony",
+          temporal_address: "localhost:7233",
+          temporal_namespace: "default",
+          temporal_task_queue: "symphony",
+          temporal_status_poll_ms: 5_000,
+          k3s_namespace: "symphony",
+          k3s_image: "symphony/agent:latest",
+          k3s_project_root: Path.join(System.tmp_dir!(), "symphony_projects"),
+          k3s_shared_cache_root: Path.join(System.tmp_dir!(), "symphony_shared"),
+          k3s_ttl_seconds_after_finished: 86_400,
+          k3s_default_cpu: "2",
+          k3s_default_memory: "8Gi",
+          k3s_default_gpu_count: 0,
+          k3s_runtime_class: nil,
+          repository_origin_url: nil,
+          repository_default_branch: "main",
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           max_concurrent_agents: 10,
           max_turns: 20,
@@ -132,9 +153,30 @@ defmodule SymphonyElixir.TestSupport do
     tracker_api_token = Keyword.get(config, :tracker_api_token)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
+    tracker_file = Keyword.get(config, :tracker_file)
+    tracker_root_id = Keyword.get(config, :tracker_root_id)
+    tracker_emacsclient_command = Keyword.get(config, :tracker_emacsclient_command)
+    tracker_state_map = Keyword.get(config, :tracker_state_map)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
+    execution_kind = Keyword.get(config, :execution_kind)
+    temporal_helper_command = Keyword.get(config, :temporal_helper_command)
+    temporal_address = Keyword.get(config, :temporal_address)
+    temporal_namespace = Keyword.get(config, :temporal_namespace)
+    temporal_task_queue = Keyword.get(config, :temporal_task_queue)
+    temporal_status_poll_ms = Keyword.get(config, :temporal_status_poll_ms)
+    k3s_namespace = Keyword.get(config, :k3s_namespace)
+    k3s_image = Keyword.get(config, :k3s_image)
+    k3s_project_root = Keyword.get(config, :k3s_project_root)
+    k3s_shared_cache_root = Keyword.get(config, :k3s_shared_cache_root)
+    k3s_ttl_seconds_after_finished = Keyword.get(config, :k3s_ttl_seconds_after_finished)
+    k3s_default_cpu = Keyword.get(config, :k3s_default_cpu)
+    k3s_default_memory = Keyword.get(config, :k3s_default_memory)
+    k3s_default_gpu_count = Keyword.get(config, :k3s_default_gpu_count)
+    k3s_runtime_class = Keyword.get(config, :k3s_runtime_class)
+    repository_origin_url = Keyword.get(config, :repository_origin_url)
+    repository_default_branch = Keyword.get(config, :repository_default_branch)
     workspace_root = Keyword.get(config, :workspace_root)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
@@ -168,10 +210,35 @@ defmodule SymphonyElixir.TestSupport do
         "  api_key: #{yaml_value(tracker_api_token)}",
         "  project_slug: #{yaml_value(tracker_project_slug)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
+        "  file: #{yaml_value(tracker_file)}",
+        "  root_id: #{yaml_value(tracker_root_id)}",
+        "  emacsclient_command: #{yaml_value(tracker_emacsclient_command)}",
+        "  state_map: #{yaml_value(tracker_state_map)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
+        "execution:",
+        "  kind: #{yaml_value(execution_kind)}",
+        "temporal:",
+        "  helper_command: #{yaml_value(temporal_helper_command)}",
+        "  address: #{yaml_value(temporal_address)}",
+        "  namespace: #{yaml_value(temporal_namespace)}",
+        "  task_queue: #{yaml_value(temporal_task_queue)}",
+        "  status_poll_ms: #{yaml_value(temporal_status_poll_ms)}",
+        "k3s:",
+        "  namespace: #{yaml_value(k3s_namespace)}",
+        "  image: #{yaml_value(k3s_image)}",
+        "  project_root: #{yaml_value(k3s_project_root)}",
+        "  shared_cache_root: #{yaml_value(k3s_shared_cache_root)}",
+        "  ttl_seconds_after_finished: #{yaml_value(k3s_ttl_seconds_after_finished)}",
+        "  default_cpu: #{yaml_value(k3s_default_cpu)}",
+        "  default_memory: #{yaml_value(k3s_default_memory)}",
+        "  default_gpu_count: #{yaml_value(k3s_default_gpu_count)}",
+        "  runtime_class: #{yaml_value(k3s_runtime_class)}",
+        "repository:",
+        "  origin_url: #{yaml_value(repository_origin_url)}",
+        "  default_branch: #{yaml_value(repository_default_branch)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "agent:",

@@ -390,16 +390,8 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_project_link_lines do
-    project_part =
-      case Config.linear_project_slug() do
-        project_slug when is_binary(project_slug) and project_slug != "" ->
-          colorize(linear_project_url(project_slug), @ansi_cyan)
-
-        _ ->
-          colorize("n/a", @ansi_gray)
-      end
-
-    project_line = colorize("│ Project: ", @ansi_bold) <> project_part
+    {label, value, ansi} = tracker_link_parts()
+    project_line = colorize("│ #{label}: ", @ansi_bold) <> colorize(value, ansi)
 
     case dashboard_url() do
       url when is_binary(url) ->
@@ -407,6 +399,31 @@ defmodule SymphonyElixir.StatusDashboard do
 
       _ ->
         [project_line]
+    end
+  end
+
+  defp tracker_link_parts do
+    case Config.tracker_kind() do
+      "orgmode" ->
+        case {Config.org_file(), Config.org_root_id()} do
+          {file, root_id} when is_binary(file) and is_binary(root_id) ->
+            {"Org File", "#{file}#ID=#{root_id}", @ansi_cyan}
+
+          {file, _root_id} when is_binary(file) ->
+            {"Org File", file, @ansi_cyan}
+
+          _ ->
+            {"Tracker", "n/a", @ansi_gray}
+        end
+
+      _ ->
+        case Config.linear_project_slug() do
+          project_slug when is_binary(project_slug) and project_slug != "" ->
+            {"Project", linear_project_url(project_slug), @ansi_cyan}
+
+          _ ->
+            {"Project", "n/a", @ansi_gray}
+        end
     end
   end
 

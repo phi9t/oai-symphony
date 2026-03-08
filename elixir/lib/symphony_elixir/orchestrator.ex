@@ -1,14 +1,14 @@
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
-  Polls Linear and dispatches repository copies to Codex-backed workers.
+  Polls the configured tracker and dispatches repository copies to Codex-backed workers.
   """
 
   use GenServer
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.{AgentRunner, Config, Execution, StatusDashboard, Tracker}
+  alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -186,8 +186,35 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Linear project slug missing in WORKFLOW.md")
         state
 
+      {:error, :missing_org_tracker_file} ->
+        Logger.error("Org tracker file missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_org_tracker_root_id} ->
+        Logger.error("Org tracker root_id missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_org_emacsclient} ->
+        Logger.error("Org tracker emacsclient command is unavailable")
+        state
+
       {:error, :missing_tracker_kind} ->
         Logger.error("Tracker kind missing in WORKFLOW.md")
+
+        state
+
+      {:error, {:unsupported_execution_kind, kind}} ->
+        Logger.error("Unsupported execution kind in WORKFLOW.md: #{inspect(kind)}")
+
+        state
+
+      {:error, :missing_temporal_helper_command} ->
+        Logger.error("Temporal helper command missing in WORKFLOW.md")
+
+        state
+
+      {:error, :missing_repository_origin_url} ->
+        Logger.error("Repository origin URL missing in WORKFLOW.md for temporal_k3s execution")
 
         state
 
@@ -225,7 +252,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+        Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
         state
 
       false ->
@@ -339,10 +366,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
-
-        if cleanup_workspace do
-          cleanup_issue_workspace(identifier)
-        end
+        _ = Execution.cancel(running_entry)
 
         if is_pid(pid) do
           terminate_task(pid)
@@ -350,6 +374,10 @@ defmodule SymphonyElixir.Orchestrator do
 
         if is_reference(ref) do
           Process.demonitor(ref, [:flush])
+        end
+
+        if cleanup_workspace do
+          cleanup_issue_workspace(identifier, running_entry)
         end
 
         %{
@@ -378,7 +406,11 @@ defmodule SymphonyElixir.Orchestrator do
         now = DateTime.utc_now()
 
         Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
+          if Execution.skip_stall_detection?(running_entry) do
+            state_acc
+          else
+            restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
+          end
         end)
     end
   end
@@ -562,14 +594,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp terminal_state_set do
-    Config.linear_terminal_states()
+    Config.tracker_terminal_states()
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
   end
 
   defp active_state_set do
-    Config.linear_active_states()
+    Config.tracker_active_states()
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
@@ -613,6 +645,14 @@ defmodule SymphonyElixir.Orchestrator do
             identifier: issue.identifier,
             issue: issue,
             session_id: nil,
+            execution_backend: Config.execution_kind(),
+            workflow_id: nil,
+            workflow_run_id: nil,
+            project_id: nil,
+            workspace_path: Execution.workspace_path(issue.identifier || issue.id || "issue"),
+            artifact_dir: nil,
+            job_name: nil,
+            last_execution_status: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
             last_codex_event: nil,
@@ -749,7 +789,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(issue.identifier)
+        cleanup_issue_workspace(issue.identifier, nil)
         {:noreply, release_issue_claim(state, issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
@@ -767,19 +807,21 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
-  defp cleanup_issue_workspace(identifier) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier)
+  defp cleanup_issue_workspace(identifier, running_entry)
+
+  defp cleanup_issue_workspace(identifier, running_entry) when is_binary(identifier) do
+    Execution.cleanup_issue_workspace(identifier, running_entry)
   end
 
-  defp cleanup_issue_workspace(_identifier), do: :ok
+  defp cleanup_issue_workspace(_identifier, _running_entry), do: :ok
 
   defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.linear_terminal_states()) do
+    case Tracker.fetch_issues_by_states(Config.tracker_terminal_states()) do
       {:ok, issues} ->
         issues
         |> Enum.each(fn
           %Issue{identifier: identifier} when is_binary(identifier) ->
-            cleanup_issue_workspace(identifier)
+            cleanup_issue_workspace(identifier, nil)
 
           _ ->
             :ok
@@ -927,6 +969,14 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: metadata.identifier,
           state: metadata.issue.state,
           session_id: metadata.session_id,
+          execution_backend: Map.get(metadata, :execution_backend),
+          workflow_id: Map.get(metadata, :workflow_id),
+          workflow_run_id: Map.get(metadata, :workflow_run_id),
+          project_id: Map.get(metadata, :project_id),
+          workspace_path: Map.get(metadata, :workspace_path),
+          artifact_dir: Map.get(metadata, :artifact_dir),
+          job_name: Map.get(metadata, :job_name),
+          last_execution_status: Map.get(metadata, :last_execution_status),
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
@@ -1001,6 +1051,14 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,
+        execution_backend: execution_backend_for_update(Map.get(running_entry, :execution_backend), update),
+        workflow_id: workflow_id_for_update(Map.get(running_entry, :workflow_id), update),
+        workflow_run_id: workflow_run_id_for_update(Map.get(running_entry, :workflow_run_id), update),
+        project_id: project_id_for_update(Map.get(running_entry, :project_id), update),
+        workspace_path: workspace_path_for_update(Map.get(running_entry, :workspace_path), update),
+        artifact_dir: artifact_dir_for_update(Map.get(running_entry, :artifact_dir), update),
+        job_name: job_name_for_update(Map.get(running_entry, :job_name), update),
+        last_execution_status: execution_status_for_update(Map.get(running_entry, :last_execution_status), update),
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
@@ -1026,6 +1084,47 @@ defmodule SymphonyElixir.Orchestrator do
     do: to_string(pid)
 
   defp codex_app_server_pid_for_update(existing, _update), do: existing
+
+  defp execution_backend_for_update(_existing, %{execution_backend: backend}) when is_binary(backend),
+    do: backend
+
+  defp execution_backend_for_update(existing, _update), do: existing
+
+  defp workflow_id_for_update(_existing, %{workflow_id: workflow_id}) when is_binary(workflow_id),
+    do: workflow_id
+
+  defp workflow_id_for_update(existing, _update), do: existing
+
+  defp workflow_run_id_for_update(_existing, %{workflow_run_id: workflow_run_id})
+       when is_binary(workflow_run_id),
+       do: workflow_run_id
+
+  defp workflow_run_id_for_update(existing, _update), do: existing
+
+  defp project_id_for_update(_existing, %{project_id: project_id}) when is_binary(project_id),
+    do: project_id
+
+  defp project_id_for_update(existing, _update), do: existing
+
+  defp workspace_path_for_update(_existing, %{workspace_path: workspace_path})
+       when is_binary(workspace_path),
+       do: workspace_path
+
+  defp workspace_path_for_update(existing, _update), do: existing
+
+  defp artifact_dir_for_update(_existing, %{artifact_dir: artifact_dir}) when is_binary(artifact_dir),
+    do: artifact_dir
+
+  defp artifact_dir_for_update(existing, _update), do: existing
+
+  defp job_name_for_update(_existing, %{job_name: job_name}) when is_binary(job_name), do: job_name
+  defp job_name_for_update(existing, _update), do: existing
+
+  defp execution_status_for_update(_existing, %{payload: %{params: %{"status" => status}}})
+       when is_binary(status),
+       do: status
+
+  defp execution_status_for_update(existing, _update), do: existing
 
   defp session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
     do: session_id

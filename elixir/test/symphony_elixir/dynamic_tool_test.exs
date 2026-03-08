@@ -3,6 +3,13 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
+  defmodule FakeOrgAdapter do
+    def get_task(task_id), do: {:ok, %{"id" => task_id, "title" => "Task #{task_id}"}}
+    def update_issue_state(_task_id, _state), do: :ok
+    def get_workpad(task_id), do: {:ok, "workpad for #{task_id}"}
+    def replace_workpad(_task_id, content), do: {:ok, content}
+  end
+
   test "tool_specs advertises the linear_graphql input contract" do
     assert [
              %{
@@ -374,5 +381,104 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                "text" => ":ok"
              }
            ] = response["contentItems"]
+  end
+
+  test "tool_specs advertises the org_task contract when orgmode is enabled" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/bin/sh"
+    )
+
+    assert [
+             %{
+               "description" => description,
+               "inputSchema" => %{
+                 "properties" => %{
+                   "action" => _,
+                   "content" => _,
+                   "state" => _,
+                   "taskId" => _
+                 },
+                 "required" => ["action"],
+                 "type" => "object"
+               },
+               "name" => "org_task"
+             }
+           ] = DynamicTool.tool_specs()
+
+    assert description =~ "Org mode"
+  end
+
+  test "org_task defaults to the current issue id and returns task data" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/bin/sh"
+    )
+
+    response =
+      DynamicTool.execute(
+        "org_task",
+        %{"action" => "get_task"},
+        issue: %{id: "ORG-1"},
+        org_adapter: FakeOrgAdapter
+      )
+
+    assert response["success"] == true
+
+    assert [
+             %{
+               "text" => text
+             }
+           ] = response["contentItems"]
+
+    assert Jason.decode!(text) == %{"id" => "ORG-1", "title" => "Task ORG-1"}
+  end
+
+  test "org_task supports workpad replacement and validation errors" do
+    response =
+      DynamicTool.execute(
+        "org_task",
+        %{"action" => "replace_workpad", "taskId" => "ORG-2", "content" => "updated body"},
+        org_adapter: FakeOrgAdapter
+      )
+
+    assert response["success"] == true
+
+    assert [
+             %{
+               "text" => success_text
+             }
+           ] = response["contentItems"]
+
+    assert Jason.decode!(success_text) == %{"taskId" => "ORG-2", "content" => "updated body"}
+
+    missing_state =
+      DynamicTool.execute(
+        "org_task",
+        %{"action" => "set_state", "taskId" => "ORG-2"},
+        org_adapter: FakeOrgAdapter
+      )
+
+    assert missing_state["success"] == false
+
+    assert [
+             %{
+               "text" => failure_text
+             }
+           ] = missing_state["contentItems"]
+
+    assert Jason.decode!(failure_text) == %{
+             "error" => %{
+               "message" => "`org_task.state` is required for `set_state`."
+             }
+           }
   end
 end

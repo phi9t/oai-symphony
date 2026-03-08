@@ -1,0 +1,128 @@
+#!/bin/bash
+
+set -eu -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly K3S_ROOT="${SCRIPT_DIR}/.."
+
+# shellcheck source=../lib/k3s-common.sh
+source "${K3S_ROOT}/lib/k3s-common.sh"
+
+SUBCOMMAND=""
+PROJECT_ID=""
+JOB_NAME=""
+NAMESPACE="symphony"
+IMAGE="symphony/agent:latest"
+CPU_REQUEST="2"
+MEMORY_REQUEST="8Gi"
+PROJECT_ROOT=""
+SHARED_CACHE_ROOT=""
+OUTPUT="text"
+JOB_COMMAND=""
+
+usage() {
+    cat <<'EOF'
+Usage:
+  sjob run --project-id <id> --job <name> --project-root <path> --shared-cache-root <path> [--namespace <ns>] [--image <image>] [--cpu <cpu>] [--memory <mem>] -- <command>
+  sjob status --project-id <id> --job <name> [--namespace <ns>] [--output text|json]
+  sjob stop --project-id <id> --job <name> [--namespace <ns>]
+EOF
+}
+
+parse_args() {
+    [[ $# -gt 0 ]] || { usage; exit 2; }
+    SUBCOMMAND="$1"
+    shift
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project-id) PROJECT_ID="$2"; shift 2 ;;
+            --job) JOB_NAME="$2"; shift 2 ;;
+            --namespace) NAMESPACE="$2"; shift 2 ;;
+            --image) IMAGE="$2"; shift 2 ;;
+            --cpu) CPU_REQUEST="$2"; shift 2 ;;
+            --memory) MEMORY_REQUEST="$2"; shift 2 ;;
+            --project-root) PROJECT_ROOT="$2"; shift 2 ;;
+            --shared-cache-root) SHARED_CACHE_ROOT="$2"; shift 2 ;;
+            --output) OUTPUT="$2"; shift 2 ;;
+            --) shift; JOB_COMMAND="$*"; break ;;
+            *) echo "unknown option: $1" >&2; usage; exit 2 ;;
+        esac
+    done
+}
+
+job_resource_name() {
+    echo "symphony-job-${PROJECT_ID}-${JOB_NAME}"
+}
+
+status_json() {
+    local status="$1"
+    printf '{"status":"%s","jobName":"%s"}\n' "${status}" "$(job_resource_name)"
+}
+
+cmd_run() {
+    [[ -n "${PROJECT_ID}" && -n "${JOB_NAME}" && -n "${PROJECT_ROOT}" && -n "${SHARED_CACHE_ROOT}" ]] || die "project-id, job, project-root, and shared-cache-root are required"
+    [[ -n "${JOB_COMMAND}" ]] || die "missing job command"
+
+    check_kubectl
+    ensure_dirs "${PROJECT_ROOT}"
+
+    REPO_ROOT="$(cd "${K3S_ROOT}/.." && pwd)"
+    export PROJECT_ID JOB_NAME NAMESPACE IMAGE CPU_REQUEST MEMORY_REQUEST JOB_COMMAND PROJECT_ROOT SHARED_CACHE_ROOT REPO_ROOT
+    export REPO_ROOT
+
+    envsubst < "${K3S_ROOT}/templates/job.yaml" | kubectl apply -f -
+    log "submitted $(job_resource_name)"
+}
+
+cmd_status() {
+    [[ -n "${PROJECT_ID}" && -n "${JOB_NAME}" ]] || die "project-id and job are required"
+    check_kubectl
+
+    local resource_name
+    resource_name="$(job_resource_name)"
+
+    if ! kubectl get job -n "${NAMESPACE}" "${resource_name}" >/dev/null 2>&1; then
+        if [[ "${OUTPUT}" == "json" ]]; then
+            status_json "missing"
+        else
+            echo "missing"
+        fi
+        return 0
+    fi
+
+    local succeeded
+    succeeded="$(kubectl get job -n "${NAMESPACE}" "${resource_name}" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
+    local failed
+    failed="$(kubectl get job -n "${NAMESPACE}" "${resource_name}" -o jsonpath='{.status.failed}' 2>/dev/null || true)"
+
+    local status="running"
+    if [[ "${succeeded}" == "1" ]]; then
+        status="succeeded"
+    elif [[ "${failed}" != "" && "${failed}" != "0" ]]; then
+        status="failed"
+    fi
+
+    if [[ "${OUTPUT}" == "json" ]]; then
+        status_json "${status}"
+    else
+        echo "${status}"
+    fi
+}
+
+cmd_stop() {
+    [[ -n "${PROJECT_ID}" && -n "${JOB_NAME}" ]] || die "project-id and job are required"
+    check_kubectl
+    kubectl delete job -n "${NAMESPACE}" "$(job_resource_name)" --ignore-not-found=true >/dev/null
+    log "deleted $(job_resource_name)"
+}
+
+parse_args "$@"
+
+case "${SUBCOMMAND}" in
+    run) cmd_run ;;
+    status) cmd_status ;;
+    stop) cmd_stop ;;
+    *) usage; exit 2 ;;
+esac

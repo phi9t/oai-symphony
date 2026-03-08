@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Execution, Orchestrator, StatusDashboard}
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -66,7 +66,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: issue_id_from_entries(running, retry),
       status: issue_status(running, retry),
       workspace: %{
-        path: Path.join(Config.workspace_root(), issue_identifier)
+        path: Execution.workspace_path(issue_identifier, running || retry)
       },
       attempts: %{
         restart_count: restart_count(retry),
@@ -100,6 +100,14 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_identifier: entry.identifier,
       state: entry.state,
       session_id: entry.session_id,
+      execution_backend: entry.execution_backend,
+      workflow_id: entry.workflow_id,
+      workflow_run_id: entry.workflow_run_id,
+      project_id: entry.project_id,
+      workspace_path: entry.workspace_path,
+      artifact_dir: entry.artifact_dir,
+      job_name: entry.job_name,
+      last_execution_status: entry.last_execution_status,
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
@@ -126,6 +134,14 @@ defmodule SymphonyElixirWeb.Presenter do
   defp running_issue_payload(running) do
     %{
       session_id: running.session_id,
+      execution_backend: running.execution_backend,
+      workflow_id: running.workflow_id,
+      workflow_run_id: running.workflow_run_id,
+      project_id: running.project_id,
+      workspace_path: running.workspace_path,
+      artifact_dir: running.artifact_dir,
+      job_name: running.job_name,
+      last_execution_status: running.last_execution_status,
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
       started_at: iso8601(running.started_at),

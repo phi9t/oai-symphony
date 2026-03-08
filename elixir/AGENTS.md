@@ -1,6 +1,6 @@
 # Symphony Elixir
 
-This directory contains the Elixir agent orchestration service that polls Linear, creates per-issue workspaces, and runs Codex in app-server mode.
+This directory contains the Elixir agent orchestration service that polls the configured tracker, creates per-issue workspaces, and runs Codex in app-server mode.
 
 ## Environment
 
@@ -12,6 +12,7 @@ This directory contains the Elixir agent orchestration service that polls Linear
 ## Codebase-Specific Conventions
 
 - Runtime config is loaded from `WORKFLOW.md` front matter via `SymphonyElixir.Workflow` and `SymphonyElixir.Config`.
+- The shipped workflow now defaults to `tracker.kind: orgmode` and `execution.kind: temporal_k3s`, with Org workpad sync handled through local `.symphony` artifacts rather than a live `org_task` flow.
 - Keep the implementation aligned with [`../SPEC.md`](../SPEC.md) where practical.
   - The implementation may be a superset of the spec.
   - The implementation must not conflict with the spec.
