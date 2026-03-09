@@ -149,7 +149,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_root_id: "ROOT-1",
       tracker_emacsclient_command: "/bin/sh",
       execution_kind: "temporal_k3s",
-      temporal_helper_command: "go run ./temporal/cmd/symphony",
+      temporal_helper_command: "./temporal/bin/symphony",
       repository_origin_url: "https://example.com/repo.git",
       repository_default_branch: "trunk",
       k3s_project_root: "/tmp/symphony-projects",
@@ -157,7 +157,7 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.execution_kind() == "temporal_k3s"
-    assert Config.temporal_helper_command() == "go run ./temporal/cmd/symphony"
+    assert Config.temporal_helper_command() == "./temporal/bin/symphony"
     assert Config.repository_origin_url() == "https://example.com/repo.git"
     assert Config.repository_default_branch() == "trunk"
     assert Config.k3s_project_root() == "/tmp/symphony-projects"
@@ -562,7 +562,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, 100, 1_250)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do

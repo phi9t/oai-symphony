@@ -1,11 +1,13 @@
 defmodule SymphonyElixir.CLITest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureIO
+
   alias SymphonyElixir.CLI
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
-  test "returns the guardrails acknowledgement banner when the flag is missing" do
+  test "prints the guardrails acknowledgement banner when the flag is missing" do
     parent = self()
 
     deps = %{
@@ -31,16 +33,20 @@ defmodule SymphonyElixir.CLITest do
       end
     }
 
-    assert {:error, banner} = CLI.evaluate(["WORKFLOW.md"], deps)
+    banner =
+      capture_io(:stderr, fn ->
+        assert :ok = CLI.evaluate(["WORKFLOW.md"], deps)
+      end)
+
     assert banner =~ "This Symphony implementation is a low key engineering preview."
     assert banner =~ "Codex will run without any guardrails."
     assert banner =~ "SymphonyElixir is not a supported product and is presented as-is."
     assert banner =~ @ack_flag
-    refute_received :file_checked
-    refute_received :workflow_set
+    assert_received :file_checked
+    assert_received :workflow_set
     refute_received :logs_root_set
     refute_received :port_set
-    refute_received :started
+    assert_received :started
   end
 
   test "defaults to WORKFLOW.md when workflow path is missing" do

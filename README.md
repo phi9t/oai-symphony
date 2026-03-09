@@ -34,6 +34,18 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+The repository now also ships a repo-owned Temporal/K3s developer stack for the remote backend:
+
+```bash
+./dev/temporal-k3s up
+./dev/temporal-k3s status
+./dev/temporal-k3s smoke
+./dev/temporal-k3s down
+```
+
+See [elixir/README.md](elixir/README.md) for the detailed bring-up, health-check, and teardown
+workflow.
+
 ---
 
 ## License

@@ -406,12 +406,15 @@ defmodule SymphonyElixir.Orchestrator do
         now = DateTime.utc_now()
 
         Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          if Execution.skip_stall_detection?(running_entry) do
-            state_acc
-          else
-            restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
-          end
+          reconcile_stalled_running_issue(state_acc, issue_id, running_entry, now, timeout_ms)
         end)
+    end
+  end
+
+  defp reconcile_stalled_running_issue(state, issue_id, running_entry, now, timeout_ms) do
+    case Execution.skip_stall_detection?(running_entry) do
+      true -> state
+      false -> restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
     end
   end
 
@@ -452,8 +455,6 @@ defmodule SymphonyElixir.Orchestrator do
   defp last_activity_timestamp(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
   end
-
-  defp last_activity_timestamp(_running_entry), do: nil
 
   defp terminate_task(pid) when is_pid(pid) do
     case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do

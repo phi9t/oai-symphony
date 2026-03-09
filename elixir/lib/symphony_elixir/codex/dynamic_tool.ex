@@ -105,7 +105,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       graphql_response(response)
     else
       {:error, reason} ->
-        failure_response(tool_error_payload(reason))
+        failure_response(linear_tool_error_payload(reason))
     end
   end
 
@@ -126,9 +126,9 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp run_org_task(%{action: "set_state", task_id: task_id, state: state}, org_adapter) do
-    with :ok <- org_adapter.update_issue_state(task_id, state),
-         {:ok, task} <- org_adapter.get_task(task_id) do
-      {:ok, task}
+    case org_adapter.update_issue_state(task_id, state) do
+      :ok -> org_adapter.get_task(task_id)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -172,24 +172,32 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp normalize_org_task_arguments(arguments, opts) when is_map(arguments) do
     with {:ok, action} <- normalize_org_action(arguments),
          {:ok, task_id} <- normalize_org_task_id(arguments, opts) do
-      case action do
-        "set_state" ->
-          with {:ok, state} <- normalize_org_state(arguments) do
-            {:ok, %{action: action, task_id: task_id, state: state}}
-          end
-
-        "replace_workpad" ->
-          with {:ok, content} <- normalize_org_content(arguments) do
-            {:ok, %{action: action, task_id: task_id, content: content}}
-          end
-
-        _ ->
-          {:ok, %{action: action, task_id: task_id}}
-      end
+      build_org_task_arguments(action, task_id, arguments)
     end
   end
 
   defp normalize_org_task_arguments(_arguments, _opts), do: {:error, :invalid_org_arguments}
+
+  defp build_org_task_arguments("set_state", task_id, arguments) do
+    case normalize_org_state(arguments) do
+      {:ok, state} -> {:ok, %{action: "set_state", task_id: task_id, state: state}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp build_org_task_arguments("replace_workpad", task_id, arguments) do
+    case normalize_org_content(arguments) do
+      {:ok, content} ->
+        {:ok, %{action: "replace_workpad", task_id: task_id, content: content}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp build_org_task_arguments(action, task_id, _arguments) do
+    {:ok, %{action: action, task_id: task_id}}
+  end
 
   defp normalize_org_action(arguments) do
     case Map.get(arguments, "action") || Map.get(arguments, :action) do
@@ -484,6 +492,18 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "reason" => inspect(reason)
       }
     }
+  end
+
+  defp linear_tool_error_payload(reason) do
+    case tool_error_payload(reason) do
+      %{"error" => %{"message" => "Dynamic tool execution failed."} = error} ->
+        %{
+          "error" => Map.put(error, "message", "Linear GraphQL tool execution failed.")
+        }
+
+      payload ->
+        payload
+    end
   end
 
   defp supported_tool_names do

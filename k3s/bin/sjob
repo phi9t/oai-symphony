@@ -16,6 +16,7 @@ NAMESPACE="symphony"
 IMAGE="symphony/agent:latest"
 CPU_REQUEST="2"
 MEMORY_REQUEST="8Gi"
+TTL_SECONDS_AFTER_FINISHED="86400"
 PROJECT_ROOT=""
 SHARED_CACHE_ROOT=""
 OUTPUT="text"
@@ -24,7 +25,7 @@ JOB_COMMAND=""
 usage() {
     cat <<'EOF'
 Usage:
-  sjob run --project-id <id> --job <name> --project-root <path> --shared-cache-root <path> [--namespace <ns>] [--image <image>] [--cpu <cpu>] [--memory <mem>] -- <command>
+  sjob run --project-id <id> --job <name> --project-root <path> --shared-cache-root <path> [--namespace <ns>] [--image <image>] [--cpu <cpu>] [--memory <mem>] [--ttl-seconds-after-finished <seconds>] -- <command>
   sjob status --project-id <id> --job <name> [--namespace <ns>] [--output text|json]
   sjob stop --project-id <id> --job <name> [--namespace <ns>]
 EOF
@@ -43,6 +44,7 @@ parse_args() {
             --image) IMAGE="$2"; shift 2 ;;
             --cpu) CPU_REQUEST="$2"; shift 2 ;;
             --memory) MEMORY_REQUEST="$2"; shift 2 ;;
+            --ttl-seconds-after-finished) TTL_SECONDS_AFTER_FINISHED="$2"; shift 2 ;;
             --project-root) PROJECT_ROOT="$2"; shift 2 ;;
             --shared-cache-root) SHARED_CACHE_ROOT="$2"; shift 2 ;;
             --output) OUTPUT="$2"; shift 2 ;;
@@ -66,13 +68,14 @@ cmd_run() {
     [[ -n "${JOB_COMMAND}" ]] || die "missing job command"
 
     check_kubectl
+    check_envsubst
     ensure_dirs "${PROJECT_ROOT}"
 
     REPO_ROOT="$(cd "${K3S_ROOT}/.." && pwd)"
-    export PROJECT_ID JOB_NAME NAMESPACE IMAGE CPU_REQUEST MEMORY_REQUEST JOB_COMMAND PROJECT_ROOT SHARED_CACHE_ROOT REPO_ROOT
+    export PROJECT_ID JOB_NAME NAMESPACE IMAGE CPU_REQUEST MEMORY_REQUEST TTL_SECONDS_AFTER_FINISHED JOB_COMMAND PROJECT_ROOT SHARED_CACHE_ROOT REPO_ROOT
     export REPO_ROOT
 
-    envsubst < "${K3S_ROOT}/templates/job.yaml" | kubectl apply -f -
+    envsubst < "${K3S_ROOT}/templates/job.yaml" | kubectl_cmd apply -f -
     log "submitted $(job_resource_name)"
 }
 
@@ -83,7 +86,7 @@ cmd_status() {
     local resource_name
     resource_name="$(job_resource_name)"
 
-    if ! kubectl get job -n "${NAMESPACE}" "${resource_name}" >/dev/null 2>&1; then
+    if ! kubectl_cmd get job -n "${NAMESPACE}" "${resource_name}" >/dev/null 2>&1; then
         if [[ "${OUTPUT}" == "json" ]]; then
             status_json "missing"
         else
@@ -93,9 +96,9 @@ cmd_status() {
     fi
 
     local succeeded
-    succeeded="$(kubectl get job -n "${NAMESPACE}" "${resource_name}" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
+    succeeded="$(kubectl_cmd get job -n "${NAMESPACE}" "${resource_name}" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
     local failed
-    failed="$(kubectl get job -n "${NAMESPACE}" "${resource_name}" -o jsonpath='{.status.failed}' 2>/dev/null || true)"
+    failed="$(kubectl_cmd get job -n "${NAMESPACE}" "${resource_name}" -o jsonpath='{.status.failed}' 2>/dev/null || true)"
 
     local status="running"
     if [[ "${succeeded}" == "1" ]]; then
@@ -114,7 +117,7 @@ cmd_status() {
 cmd_stop() {
     [[ -n "${PROJECT_ID}" && -n "${JOB_NAME}" ]] || die "project-id and job are required"
     check_kubectl
-    kubectl delete job -n "${NAMESPACE}" "$(job_resource_name)" --ignore-not-found=true >/dev/null
+    kubectl_cmd delete job -n "${NAMESPACE}" "$(job_resource_name)" --ignore-not-found=true >/dev/null
     log "deleted $(job_resource_name)"
 }
 

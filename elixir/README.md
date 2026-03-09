@@ -38,11 +38,15 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 ## Prerequisites
 
-We recommend using [mise](https://mise.jdx.dev/) to manage Elixir/Erlang versions.
+We recommend using [mise](https://mise.jdx.dev/) to manage the Elixir/Erlang/Go toolchain.
+Install Docker separately; the remote backend dev stack uses Docker to start both Temporal and a
+single-node K3s control plane.
 
 ```bash
 mise install
 mise exec -- elixir --version
+mise exec -- go version
+docker --version
 ```
 
 ## Run
@@ -56,9 +60,58 @@ cd elixir
 mise exec -- mix setup
 mise exec -- mix build
 cd ..
-go run ./temporal/cmd/worker &
+./dev/temporal-k3s up
+./dev/temporal-k3s smoke
+eval "$(./dev/temporal-k3s env)"
 mise exec -- ./elixir/bin/symphony ./elixir/WORKFLOW.md
 ```
+
+When you are done with the remote backend, tear it down with:
+
+```bash
+./dev/temporal-k3s down
+```
+
+## Remote Backend Dev Stack
+
+The repository now ships `./dev/temporal-k3s`, which provides a repeatable local bring-up path for
+the Temporal/K3s backend:
+
+```bash
+./dev/temporal-k3s up
+./dev/temporal-k3s status
+./dev/temporal-k3s smoke
+./dev/temporal-k3s down
+```
+
+What each command does:
+
+- `up` starts a local Temporal dev server, starts a single-node K3s server in Docker, imports the
+  repo-owned smoke image, and launches the Temporal worker with the right K3s control-plane wiring.
+- `status` acts as the health check: it verifies Temporal, K3s, the worker, and the Symphony
+  namespace are all ready.
+- `smoke` runs an end-to-end Temporal workflow that fans out into a K3s job, clones the repo in the
+  remote workspace, and writes the required `.symphony/workpad.md` plus `.symphony/run-result.json`
+  artifacts.
+- `down` stops the worker and removes the local Temporal plus K3s containers.
+
+Before starting Symphony itself, export the workflow-facing environment that matches the dev stack:
+
+```bash
+eval "$(./dev/temporal-k3s env)"
+```
+
+This exports `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`,
+`SYMPHONY_K3S_PROJECT_ROOT`, and `SYMPHONY_K3S_SHARED_CACHE_ROOT`.
+
+Notes:
+
+- The smoke workflow uses the repo-owned `symphony/smoke-agent:dev` image built by
+  `./dev/temporal-k3s up`.
+- Real agent runs still need `k3s.image` to point at an image that contains `bash`, `git`, and a
+  working implementation of your configured `codex.command`.
+- The default Temporal helper command is now `./temporal/bin/symphony`, which works correctly from
+  the repository root.
 
 ## Configuration
 
@@ -89,14 +142,14 @@ tracker:
 execution:
   kind: temporal_k3s
 temporal:
-  helper_command: "go run ./temporal/cmd/symphony"
+  helper_command: "./temporal/bin/symphony"
 repository:
   origin_url: "https://github.com/your-org/your-repo.git"
 codex:
   command: codex exec --full-auto --json
 ---
 
-You are working on an Org task {{ issue.identifier }}.
+You are working on an Org task `{{ issue.identifier }}`.
 Keep progress in ./.symphony/workpad.md and emit ./.symphony/run-result.json before exit.
 ```
 

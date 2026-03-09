@@ -57,10 +57,8 @@ defmodule SymphonyElixir.Org.Client do
 
   @spec get_workpad(String.t()) :: {:ok, String.t()} | {:error, term()}
   def get_workpad(issue_id) when is_binary(issue_id) do
-    with {:ok, %{"content" => content}} when is_binary(content) <-
-           invoke("get_workpad", %{"task_id" => issue_id}) do
-      {:ok, content}
-    else
+    case invoke("get_workpad", %{"task_id" => issue_id}) do
+      {:ok, %{"content" => content}} when is_binary(content) -> {:ok, content}
       {:ok, _unexpected} -> {:error, :invalid_org_workpad_response}
       {:error, reason} -> {:error, reason}
     end
@@ -68,12 +66,15 @@ defmodule SymphonyElixir.Org.Client do
 
   @spec replace_workpad(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def replace_workpad(issue_id, content) when is_binary(issue_id) and is_binary(content) do
-    with {:ok, %{"content" => updated_content}} when is_binary(updated_content) <-
-           invoke("replace_workpad", %{"task_id" => issue_id, "content" => content}) do
-      {:ok, updated_content}
-    else
-      {:ok, _unexpected} -> {:error, :invalid_org_workpad_response}
-      {:error, reason} -> {:error, reason}
+    case invoke("replace_workpad", %{"task_id" => issue_id, "content" => content}) do
+      {:ok, %{"content" => updated_content}} when is_binary(updated_content) ->
+        {:ok, updated_content}
+
+      {:ok, _unexpected} ->
+        {:error, :invalid_org_workpad_response}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -258,7 +259,9 @@ defmodule SymphonyElixir.Org.Client do
     """
     (progn
       (load #{Jason.encode!(helper_path)} nil t)
-      (symphony-orgmode-dispatch-json #{Jason.encode!(request_base64)}))
+      (let ((result (symphony-orgmode-dispatch-json #{Jason.encode!(request_base64)})))
+        (princ result)
+        (terpri)))
     """
     |> String.trim()
   end

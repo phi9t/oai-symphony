@@ -404,28 +404,28 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp tracker_link_parts do
     case Config.tracker_kind() do
-      "orgmode" ->
-        case {Config.org_file(), Config.org_root_id()} do
-          {file, root_id} when is_binary(file) and is_binary(root_id) ->
-            {"Org File", "#{file}#ID=#{root_id}", @ansi_cyan}
-
-          {file, _root_id} when is_binary(file) ->
-            {"Org File", file, @ansi_cyan}
-
-          _ ->
-            {"Tracker", "n/a", @ansi_gray}
-        end
-
-      _ ->
-        case Config.linear_project_slug() do
-          project_slug when is_binary(project_slug) and project_slug != "" ->
-            {"Project", linear_project_url(project_slug), @ansi_cyan}
-
-          _ ->
-            {"Project", "n/a", @ansi_gray}
-        end
+      "orgmode" -> org_tracker_link_parts(Config.org_file(), Config.org_root_id())
+      _ -> linear_tracker_link_parts(Config.linear_project_slug())
     end
   end
+
+  defp org_tracker_link_parts(file, root_id)
+       when is_binary(file) and is_binary(root_id) do
+    {"Org File", "#{file}#ID=#{root_id}", @ansi_cyan}
+  end
+
+  defp org_tracker_link_parts(file, _root_id) when is_binary(file) do
+    {"Org File", file, @ansi_cyan}
+  end
+
+  defp org_tracker_link_parts(_file, _root_id), do: {"Tracker", "n/a", @ansi_gray}
+
+  defp linear_tracker_link_parts(project_slug)
+       when is_binary(project_slug) and project_slug != "" do
+    {"Project", linear_project_url(project_slug), @ansi_cyan}
+  end
+
+  defp linear_tracker_link_parts(_project_slug), do: {"Project", "n/a", @ansi_gray}
 
   defp format_project_refresh_line(%{checking?: true}) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)
