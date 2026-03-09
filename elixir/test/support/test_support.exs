@@ -105,7 +105,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
           execution_kind: "local",
-          temporal_helper_command: "go run ./temporal/cmd/symphony",
+          temporal_helper_command: "./temporal/bin/symphony",
           temporal_address: "localhost:7233",
           temporal_namespace: "default",
           temporal_task_queue: "symphony",

@@ -100,14 +100,6 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_identifier: entry.identifier,
       state: entry.state,
       session_id: entry.session_id,
-      execution_backend: entry.execution_backend,
-      workflow_id: entry.workflow_id,
-      workflow_run_id: entry.workflow_run_id,
-      project_id: entry.project_id,
-      workspace_path: entry.workspace_path,
-      artifact_dir: entry.artifact_dir,
-      job_name: entry.job_name,
-      last_execution_status: entry.last_execution_status,
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
@@ -119,6 +111,7 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: entry.codex_total_tokens
       }
     }
+    |> put_optional_running_metadata(entry)
   end
 
   defp retry_entry_payload(entry) do
@@ -134,14 +127,6 @@ defmodule SymphonyElixirWeb.Presenter do
   defp running_issue_payload(running) do
     %{
       session_id: running.session_id,
-      execution_backend: running.execution_backend,
-      workflow_id: running.workflow_id,
-      workflow_run_id: running.workflow_run_id,
-      project_id: running.project_id,
-      workspace_path: running.workspace_path,
-      artifact_dir: running.artifact_dir,
-      job_name: running.job_name,
-      last_execution_status: running.last_execution_status,
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
       started_at: iso8601(running.started_at),
@@ -154,6 +139,7 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: running.codex_total_tokens
       }
     }
+    |> put_optional_running_metadata(running)
   end
 
   defp retry_issue_payload(retry) do
@@ -177,6 +163,21 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp summarize_message(nil), do: nil
   defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
+
+  defp put_optional_running_metadata(payload, entry) do
+    payload
+    |> put_optional_field(:execution_backend, Map.get(entry, :execution_backend))
+    |> put_optional_field(:workflow_id, Map.get(entry, :workflow_id))
+    |> put_optional_field(:workflow_run_id, Map.get(entry, :workflow_run_id))
+    |> put_optional_field(:project_id, Map.get(entry, :project_id))
+    |> put_optional_field(:workspace_path, Map.get(entry, :workspace_path))
+    |> put_optional_field(:artifact_dir, Map.get(entry, :artifact_dir))
+    |> put_optional_field(:job_name, Map.get(entry, :job_name))
+    |> put_optional_field(:last_execution_status, Map.get(entry, :last_execution_status))
+  end
+
+  defp put_optional_field(payload, _key, nil), do: payload
+  defp put_optional_field(payload, key, value), do: Map.put(payload, key, value)
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
     DateTime.utc_now()

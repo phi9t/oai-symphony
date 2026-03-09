@@ -25,9 +25,10 @@ defmodule SymphonyElixir.Execution do
 
   def cancel(_running_entry), do: :ok
 
-  @spec cleanup_issue_workspace(String.t() | nil, map() | nil) :: :ok
-  def cleanup_issue_workspace(identifier, running_entry \\ nil)
+  @spec cleanup_issue_workspace(String.t() | nil) :: :ok
+  def cleanup_issue_workspace(identifier), do: cleanup_issue_workspace(identifier, nil)
 
+  @spec cleanup_issue_workspace(String.t() | nil, map() | nil) :: :ok
   def cleanup_issue_workspace(identifier, running_entry) when is_binary(identifier) do
     if remote_backend?(running_entry || %{}) do
       TemporalK3s.remove_issue_project(identifier)
@@ -40,9 +41,10 @@ defmodule SymphonyElixir.Execution do
 
   def cleanup_issue_workspace(_identifier, _running_entry), do: :ok
 
-  @spec workspace_path(String.t(), map() | nil) :: Path.t()
-  def workspace_path(identifier, running_entry \\ nil)
+  @spec workspace_path(String.t()) :: Path.t()
+  def workspace_path(identifier), do: workspace_path(identifier, nil)
 
+  @spec workspace_path(String.t(), map() | nil) :: Path.t()
   def workspace_path(identifier, running_entry) when is_binary(identifier) do
     cond do
       is_map(running_entry) and is_binary(Map.get(running_entry, :workspace_path)) ->
@@ -65,7 +67,7 @@ defmodule SymphonyElixir.Execution do
 
   def skip_stall_detection?(_running_entry), do: false
 
-  defp safe_identifier(identifier) do
-    String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
+  defp safe_identifier(identifier) when is_binary(identifier) do
+    String.replace(identifier, ~r/[^a-zA-Z0-9._-]/, "_")
   end
 end

@@ -9,7 +9,7 @@ metadata:
     symphony/job-name: "${JOB_NAME}"
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 86400
+  ttlSecondsAfterFinished: ${TTL_SECONDS_AFTER_FINISHED}
   template:
     metadata:
       labels:

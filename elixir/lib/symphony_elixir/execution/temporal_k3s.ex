@@ -39,10 +39,11 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     input = write_input_bundle!(issue, project, prompt, workpad)
     cli_opts = cli_opts(opts)
 
-    with {:ok, run} <- TemporalCli.run(temporal_run_payload(issue, project, input), cli_opts) do
-      emit_session_started(codex_update_recipient, issue, project, run)
-      await_remote_completion(issue, project, run, cli_opts, codex_update_recipient)
-    else
+    case TemporalCli.run(temporal_run_payload(issue, project, input), cli_opts) do
+      {:ok, run} ->
+        emit_session_started(codex_update_recipient, issue, project, run)
+        await_remote_completion(issue, project, run, cli_opts, codex_update_recipient)
+
       {:error, reason} ->
         Logger.error("Temporal/K3s run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Temporal/K3s run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -115,24 +116,27 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp fetch_workpad(%Issue{id: issue_id}) when is_binary(issue_id) do
     if Config.tracker_kind() == "orgmode" do
-      case Adapter.get_workpad(issue_id) do
-        {:ok, content} when is_binary(content) ->
-          trimmed = String.trim(content)
-
-          if byte_size(trimmed) > 0 do
-            content
-          else
-            @default_workpad
-          end
-
-        _ -> @default_workpad
-      end
+      fetch_org_workpad(issue_id)
     else
       @default_workpad
     end
   end
 
   defp fetch_workpad(_issue), do: @default_workpad
+
+  defp fetch_org_workpad(issue_id) do
+    case Adapter.get_workpad(issue_id) do
+      {:ok, content} when is_binary(content) -> normalize_workpad(content)
+      _ -> @default_workpad
+    end
+  end
+
+  defp normalize_workpad(content) do
+    case String.trim(content) do
+      "" -> @default_workpad
+      _ -> content
+    end
+  end
 
   defp write_input_bundle!(issue, project, prompt, workpad) do
     File.mkdir_p!(project.symphony_path)
@@ -414,8 +418,6 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       other -> other
     end
   end
-
-  defp normalized_workflow_status(_payload), do: "running"
 
   defp read_optional_file(path) when is_binary(path) do
     case File.read(path) do

@@ -29,7 +29,7 @@ polling:
 execution:
   kind: temporal_k3s
 temporal:
-  helper_command: "go run ./temporal/cmd/symphony"
+  helper_command: "./temporal/bin/symphony"
   address: "$TEMPORAL_ADDRESS"
   namespace: "$TEMPORAL_NAMESPACE"
   task_queue: "symphony"
@@ -57,7 +57,7 @@ codex:
   command: codex exec --full-auto --json
 ---
 
-You are working on Org task `{{ issue.identifier }}`.
+You are working on an Org task `{{ issue.identifier }}`.
 
 {% if attempt %}
 Continuation context:

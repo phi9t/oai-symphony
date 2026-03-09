@@ -33,14 +33,14 @@ defmodule SymphonyElixir.CLI do
   def evaluate(args, deps \\ runtime_deps()) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
+        with :ok <- maybe_warn_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
           run(Path.expand("WORKFLOW.md"), deps)
         end
 
       {opts, [workflow_path], []} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
+        with :ok <- maybe_warn_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
           run(workflow_path, deps)
@@ -102,11 +102,12 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  defp require_guardrails_acknowledgement(opts) do
+  defp maybe_warn_guardrails_acknowledgement(opts) do
     if Keyword.get(opts, @acknowledgement_switch, false) do
       :ok
     else
-      {:error, acknowledgement_banner()}
+      IO.puts(:stderr, acknowledgement_banner())
+      :ok
     end
   end
 

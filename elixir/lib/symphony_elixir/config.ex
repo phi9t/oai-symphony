@@ -52,7 +52,7 @@ defmodule SymphonyElixir.Config do
   @default_codex_turn_timeout_ms 3_600_000
   @default_codex_read_timeout_ms 5_000
   @default_codex_stall_timeout_ms 300_000
-  @default_temporal_helper_command "go run ./temporal/cmd/symphony"
+  @default_temporal_helper_command "./temporal/bin/symphony"
   @default_temporal_address "localhost:7233"
   @default_temporal_namespace "default"
   @default_temporal_task_queue "symphony"

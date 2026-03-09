@@ -57,9 +57,7 @@ defmodule SymphonyElixir.TemporalCli do
       File.write!(payload_path, Jason.encode!(payload, pretty: true))
 
       with {:ok, binary, args} <- parse_command(command) do
-        case System.cmd(binary, args ++ [subcommand, "--input", payload_path, "--output", "json"],
-               stderr_to_stdout: true
-             ) do
+        case System.cmd(binary, args ++ [subcommand, "--input", payload_path, "--output", "json"], stderr_to_stdout: true) do
           {output, 0} ->
             {:ok, output}
 

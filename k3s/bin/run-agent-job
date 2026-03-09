@@ -15,7 +15,19 @@ mkdir -p "$(dirname "${RESULT_PATH}")"
 mkdir -p "${WORKSPACE_PATH}"
 
 if [[ ! -d "${WORKSPACE_PATH}/.git" ]]; then
-    git clone --depth 1 --branch "${REPOSITORY_DEFAULT_BRANCH}" "${REPOSITORY_ORIGIN_URL}" "${WORKSPACE_PATH}"
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=init.defaultBranch \
+    GIT_CONFIG_VALUE_0="${REPOSITORY_DEFAULT_BRANCH}" \
+    git -C "${WORKSPACE_PATH}" init >/dev/null
+
+    if git -C "${WORKSPACE_PATH}" remote get-url origin >/dev/null 2>&1; then
+        git -C "${WORKSPACE_PATH}" remote set-url origin "${REPOSITORY_ORIGIN_URL}"
+    else
+        git -C "${WORKSPACE_PATH}" remote add origin "${REPOSITORY_ORIGIN_URL}"
+    fi
+
+    git -C "${WORKSPACE_PATH}" fetch origin "${REPOSITORY_DEFAULT_BRANCH}" --depth 1
+    git -C "${WORKSPACE_PATH}" checkout -B "${REPOSITORY_DEFAULT_BRANCH}" FETCH_HEAD
 else
     git -C "${WORKSPACE_PATH}" fetch origin "${REPOSITORY_DEFAULT_BRANCH}" --depth 1 || true
 fi

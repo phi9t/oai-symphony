@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -113,6 +114,7 @@ func RunIssueJob(ctx context.Context, input RunInput) (RunResult, error) {
 		"--image", input.K3s.Image,
 		"--cpu", fallback(input.K3s.DefaultCPU, "2"),
 		"--memory", fallback(input.K3s.DefaultMemory, "8Gi"),
+		"--ttl-seconds-after-finished", strconv.Itoa(ttlSecondsAfterFinished(input.K3s.TTLSecondsAfterFinished)),
 		"--project-root", input.K3s.ProjectRoot,
 		"--shared-cache-root", input.K3s.SharedCacheRoot,
 		"--", command,
@@ -240,6 +242,13 @@ func runCommand(ctx context.Context, binary string, args []string) (string, erro
 func fallback(value, fallbackValue string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallbackValue
+	}
+	return value
+}
+
+func ttlSecondsAfterFinished(value int) int {
+	if value <= 0 {
+		return 86400
 	}
 	return value
 }

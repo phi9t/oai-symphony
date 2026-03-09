@@ -264,20 +264,33 @@
   (save-excursion
     (goto-char heading-pos)
     (let* ((body-start (progn (org-end-of-meta-data t) (point)))
-           (subtree-end (save-excursion (org-end-of-subtree t t)))
-           (content (buffer-substring-no-properties body-start subtree-end)))
+           (content-end (symphony-orgmode--section-content-end heading-pos))
+           (content (buffer-substring-no-properties body-start content-end)))
       (string-trim-right content))))
 
 (defun symphony-orgmode--replace-section-body (heading-pos content)
   (save-excursion
     (goto-char heading-pos)
     (let* ((body-start (progn (org-end-of-meta-data t) (point)))
-           (subtree-end (save-excursion (org-end-of-subtree t t))))
-      (delete-region body-start subtree-end)
+           (content-end (symphony-orgmode--section-content-end heading-pos)))
+      (delete-region body-start content-end)
       (goto-char body-start)
       (unless (string-empty-p content)
         (insert (string-trim-right content))
         (insert "\n")))))
+
+(defun symphony-orgmode--section-content-end (heading-pos)
+  (save-excursion
+    (goto-char heading-pos)
+    (let ((heading-level (org-outline-level))
+          (limit (point-max))
+          found)
+      (outline-next-heading)
+      (while (and (not found) (< (point) limit))
+        (if (<= (org-outline-level) heading-level)
+            (setq found (point))
+          (outline-next-heading)))
+      (or found limit))))
 
 (defun symphony-orgmode--direct-child-heading (parent-pos title)
   (save-excursion
