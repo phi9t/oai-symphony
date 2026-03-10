@@ -1,5 +1,8 @@
 defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
+  alias Ecto.Changeset
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -874,6 +877,122 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_concurrent_agents_for_state("In Review") == 2
     assert Config.max_concurrent_agents_for_state("Closed") == 10
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
+  end
+
+  test "schema helpers cover custom type and state limit validation" do
+    assert StringOrMap.type() == :map
+    assert StringOrMap.embed_as(:json) == :self
+    assert StringOrMap.equal?(%{"a" => 1}, %{"a" => 1})
+    refute StringOrMap.equal?(%{"a" => 1}, %{"a" => 2})
+
+    assert {:ok, "value"} = StringOrMap.cast("value")
+    assert {:ok, %{"a" => 1}} = StringOrMap.cast(%{"a" => 1})
+    assert :error = StringOrMap.cast(123)
+
+    assert {:ok, "value"} = StringOrMap.load("value")
+    assert :error = StringOrMap.load(123)
+
+    assert {:ok, %{"a" => 1}} = StringOrMap.dump(%{"a" => 1})
+    assert :error = StringOrMap.dump(123)
+
+    assert Schema.normalize_state_limits(nil) == %{}
+
+    assert Schema.normalize_state_limits(%{"In Progress" => 2, todo: 1}) == %{
+             "todo" => 1,
+             "in progress" => 2
+           }
+
+    changeset =
+      {%{}, %{limits: :map}}
+      |> Changeset.cast(%{limits: %{"" => 1, "todo" => 0}}, [:limits])
+      |> Schema.validate_state_limits(:limits)
+
+    assert changeset.errors == [
+             limits: {"state names must not be blank", []},
+             limits: {"limits must be positive integers", []}
+           ]
+  end
+
+  test "schema parse normalizes policy keys and env-backed fallbacks" do
+    missing_workspace_env = "SYMP_MISSING_WORKSPACE_#{System.unique_integer([:positive])}"
+    empty_secret_env = "SYMP_EMPTY_SECRET_#{System.unique_integer([:positive])}"
+    missing_secret_env = "SYMP_MISSING_SECRET_#{System.unique_integer([:positive])}"
+
+    previous_missing_workspace_env = System.get_env(missing_workspace_env)
+    previous_empty_secret_env = System.get_env(empty_secret_env)
+    previous_missing_secret_env = System.get_env(missing_secret_env)
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+
+    System.delete_env(missing_workspace_env)
+    System.put_env(empty_secret_env, "")
+    System.delete_env(missing_secret_env)
+    System.put_env("LINEAR_API_KEY", "fallback-linear-token")
+
+    on_exit(fn ->
+      restore_env(missing_workspace_env, previous_missing_workspace_env)
+      restore_env(empty_secret_env, previous_empty_secret_env)
+      restore_env(missing_secret_env, previous_missing_secret_env)
+      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+    end)
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{api_key: "$#{empty_secret_env}"},
+               workspace: %{root: "$#{missing_workspace_env}"},
+               codex: %{approval_policy: %{reject: %{sandbox_approval: true}}}
+             })
+
+    assert settings.tracker.api_key == nil
+    assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+
+    assert settings.codex.approval_policy == %{
+             "reject" => %{"sandbox_approval" => true}
+           }
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{api_key: "$#{missing_secret_env}"},
+               workspace: %{root: ""}
+             })
+
+    assert settings.tracker.api_key == "fallback-linear-token"
+    assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+  end
+
+  test "schema resolves sandbox policies from explicit and default workspaces" do
+    explicit_policy = %{"type" => "workspaceWrite", "writableRoots" => ["/tmp/explicit"]}
+
+    assert Schema.resolve_turn_sandbox_policy(%Schema{
+             codex: %Codex{turn_sandbox_policy: explicit_policy},
+             workspace: %Schema.Workspace{root: "/tmp/ignored"}
+           }) == explicit_policy
+
+    assert Schema.resolve_turn_sandbox_policy(%Schema{
+             codex: %Codex{turn_sandbox_policy: nil},
+             workspace: %Schema.Workspace{root: ""}
+           }) == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => [Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))],
+             "readOnlyAccess" => %{"type" => "fullAccess"},
+             "networkAccess" => false,
+             "excludeTmpdirEnvVar" => false,
+             "excludeSlashTmp" => false
+           }
+
+    assert Schema.resolve_turn_sandbox_policy(
+             %Schema{
+               codex: %Codex{turn_sandbox_policy: nil},
+               workspace: %Schema.Workspace{root: "/tmp/ignored"}
+             },
+             "/tmp/workspace"
+           ) == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => [Path.expand("/tmp/workspace")],
+             "readOnlyAccess" => %{"type" => "fullAccess"},
+             "networkAccess" => false,
+             "excludeTmpdirEnvVar" => false,
+             "excludeSlashTmp" => false
+           }
   end
 
   test "repo fork self-landing workflow pins the fork landing contract" do

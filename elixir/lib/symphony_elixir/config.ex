@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias NimbleOptions
+  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Workflow
 
   @default_active_states ["Todo", "In Progress"]
@@ -285,6 +286,27 @@ defmodule SymphonyElixir.Config do
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
   def current_workflow do
     Workflow.current()
+  end
+
+  @spec settings() :: {:ok, Schema.t()} | {:error, term()}
+  def settings do
+    validated_workflow_options()
+    |> atom_keys_to_string_keys()
+    |> Schema.parse()
+  rescue
+    error in [ArgumentError] ->
+      {:error, {:invalid_workflow_config, Exception.message(error)}}
+  end
+
+  @spec settings!() :: Schema.t()
+  def settings! do
+    case settings() do
+      {:ok, settings} ->
+        settings
+
+      {:error, reason} ->
+        raise ArgumentError, message: format_config_error(reason)
+    end
   end
 
   @spec tracker_kind() :: tracker_kind()
@@ -1348,6 +1370,40 @@ defmodule SymphonyElixir.Config do
 
       true ->
         not is_nil(System.find_executable(command))
+    end
+  end
+
+  defp atom_keys_to_string_keys(value) when is_map(value) do
+    Enum.reduce(value, %{}, fn {key, nested}, acc ->
+      normalized_key =
+        case key do
+          atom when is_atom(atom) -> Atom.to_string(atom)
+          other -> to_string(other)
+        end
+
+      Map.put(acc, normalized_key, atom_keys_to_string_keys(nested))
+    end)
+  end
+
+  defp atom_keys_to_string_keys(value) when is_list(value), do: Enum.map(value, &atom_keys_to_string_keys/1)
+  defp atom_keys_to_string_keys(value), do: value
+
+  defp format_config_error(reason) do
+    case reason do
+      {:invalid_workflow_config, message} ->
+        "Invalid WORKFLOW.md config: #{message}"
+
+      {:missing_workflow_file, path, raw_reason} ->
+        "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
+
+      {:workflow_parse_error, raw_reason} ->
+        "Failed to parse WORKFLOW.md: #{inspect(raw_reason)}"
+
+      :workflow_front_matter_not_a_map ->
+        "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
+
+      other ->
+        "Invalid WORKFLOW.md config: #{inspect(other)}"
     end
   end
 end
