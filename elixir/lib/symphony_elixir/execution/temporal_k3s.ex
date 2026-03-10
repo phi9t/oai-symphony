@@ -52,9 +52,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     end
   end
 
-  @spec cancel(map(), keyword()) :: :ok | {:error, term()}
-  def cancel(running_entry, opts \\ [])
+  @spec cancel(term()) :: :ok | {:error, term()}
+  def cancel(running_entry), do: cancel(running_entry, [])
 
+  @spec cancel(term(), keyword()) :: :ok | {:error, term()}
   def cancel(running_entry, opts) when is_map(running_entry) do
     workflow_id = Map.get(running_entry, :workflow_id)
 
@@ -182,8 +183,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       "codex" => %{
         "command" => Config.codex_command()
       },
-      "temporal" =>
-        Map.put(temporal_connection_payload(), "taskQueue", Config.temporal_task_queue()),
+      "temporal" => Map.put(temporal_connection_payload(), "taskQueue", Config.temporal_task_queue()),
       "k3s" => %{
         "namespace" => Config.k3s_namespace(),
         "image" => Config.k3s_image(),
@@ -227,7 +227,11 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
            cli_opts
          ) do
       {:ok, status} ->
-        updated_state = update_run_state(run_state, status)
+        updated_state =
+          run_state
+          |> update_run_state(status)
+          |> mark_status_check_success()
+
         emit_status_update(recipient, issue, updated_state, status)
 
         case normalized_workflow_status(status) do
@@ -245,11 +249,17 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
         end
 
       {:error, reason} ->
-        Logger.warning(
-          "Temporal/K3s status check failed for #{issue_context(issue)}: #{inspect(reason)}"
-        )
+        elapsed_ms = status_failure_elapsed_ms(run_state)
+        timeout_ms = Config.codex_stall_timeout_ms()
 
-        do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms)
+        Logger.warning("Temporal/K3s status check failed for #{issue_context(issue)} elapsed_ms=#{elapsed_ms} timeout_ms=#{timeout_ms}: #{inspect(reason)}")
+
+        if status_failure_timed_out?(elapsed_ms, timeout_ms) do
+          raise RuntimeError,
+                "Temporal/K3s status checks stalled for #{issue_context(issue)} after #{elapsed_ms}ms (timeout=#{timeout_ms}ms): #{inspect(reason)}"
+        else
+          do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms)
+        end
     end
   end
 
@@ -261,7 +271,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       job_name: string_value(Map.get(run, "jobName")),
       artifact_dir: string_value(Map.get(run, "artifactDir")) || project.outputs_path,
       workspace_path: string_value(Map.get(run, "workspacePath")) || project.workspace_path,
-      project_id: string_value(Map.get(run, "projectId")) || project.project_id
+      project_id: string_value(Map.get(run, "projectId")) || project.project_id,
+      last_status_ok_at_ms: monotonic_now_ms()
     }
   end
 
@@ -271,8 +282,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       | status: normalized_workflow_status(status),
         job_name: string_value(Map.get(status, "jobName")) || run_state.job_name,
         artifact_dir: string_value(Map.get(status, "artifactDir")) || run_state.artifact_dir,
-        workspace_path:
-          string_value(Map.get(status, "workspacePath")) || run_state.workspace_path,
+        workspace_path: string_value(Map.get(status, "workspacePath")) || run_state.workspace_path,
         run_id: string_value(Map.get(status, "runId")) || run_state.run_id
     }
   end
@@ -305,10 +315,17 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     end
   end
 
-  defp maybe_replace_org_workpad(%Issue{id: issue_id}, content)
+  defp maybe_replace_org_workpad(%Issue{id: issue_id} = issue, content)
        when is_binary(issue_id) and is_binary(content) do
     if Config.tracker_kind() == "orgmode" do
-      _ = Adapter.replace_workpad(issue_id, content)
+      case Adapter.replace_workpad(issue_id, content) do
+        {:ok, _content} ->
+          :ok
+
+        {:error, reason} ->
+          raise RuntimeError,
+                "Temporal/K3s failed to sync Org workpad for #{issue_context(issue)}: #{inspect(reason)}"
+      end
     end
 
     :ok
@@ -316,27 +333,40 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp maybe_replace_org_workpad(_issue, _content), do: :ok
 
-  defp maybe_apply_run_result_state(%Issue{id: issue_id}, %{} = result)
+  defp maybe_apply_run_result_state(%Issue{id: issue_id} = issue, %{} = result)
        when is_binary(issue_id) do
     if Config.tracker_kind() == "orgmode" do
-      target_state =
-        case string_value(Map.get(result, "targetState")) do
-          nil ->
-            default_target_state(result)
-
-          explicit ->
-            explicit
-        end
-
-      if allowed_target_state?(target_state) do
-        _ = Tracker.update_issue_state(issue_id, target_state)
-      end
+      result
+      |> target_state_from_run_result()
+      |> maybe_sync_org_state!(issue, issue_id)
     end
 
     :ok
   end
 
   defp maybe_apply_run_result_state(_issue, _result), do: :ok
+
+  defp target_state_from_run_result(result) do
+    case string_value(Map.get(result, "targetState")) do
+      nil -> default_target_state(result)
+      explicit -> explicit
+    end
+  end
+
+  defp maybe_sync_org_state!(target_state, issue, issue_id) do
+    if is_binary(target_state) and allowed_target_state?(target_state) do
+      case Tracker.update_issue_state(issue_id, target_state) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          raise RuntimeError,
+                "Temporal/K3s failed to sync Org state=#{target_state} for #{issue_context(issue)}: #{inspect(reason)}"
+      end
+    else
+      :ok
+    end
+  end
 
   defp default_target_state(result) do
     cond do
@@ -437,6 +467,19 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     }
   end
 
+  defp status_failure_elapsed_ms(run_state) do
+    now_ms = monotonic_now_ms()
+    last_status_ok_at_ms = Map.get(run_state, :last_status_ok_at_ms) || now_ms
+    max(0, now_ms - last_status_ok_at_ms)
+  end
+
+  defp status_failure_timed_out?(_elapsed_ms, timeout_ms) when timeout_ms <= 0, do: false
+  defp status_failure_timed_out?(elapsed_ms, timeout_ms), do: elapsed_ms >= timeout_ms
+
+  defp mark_status_check_success(run_state) do
+    Map.put(run_state, :last_status_ok_at_ms, monotonic_now_ms())
+  end
+
   defp maybe_put_run_id(payload, run_id) when is_binary(run_id) do
     Map.put(payload, "runId", run_id)
   end
@@ -503,6 +546,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp string_value(_value), do: nil
+
+  defp monotonic_now_ms do
+    System.monotonic_time(:millisecond)
+  end
 
   defp truthy?(true), do: true
   defp truthy?("true"), do: true

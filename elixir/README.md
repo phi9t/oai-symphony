@@ -211,6 +211,10 @@ Notes:
 - `temporal.address` and `temporal.namespace` are forwarded to helper `run`, `status`, `cancel`,
   and `describe` requests, so remote lifecycle operations stay on the same Temporal cluster.
 - The shipped remote workflow does not rely on `org_task`; Org updates are applied by Symphony after the job completes.
+- Consecutive remote `status` failures consume the same `codex.stall_timeout_ms` budget used for
+  stall detection; once the budget is exhausted, Symphony fails the run instead of polling forever.
+- If Symphony cannot write the final Org workpad or state transition back after a remote run, it
+  fails the attempt instead of silently ignoring the sync error.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`

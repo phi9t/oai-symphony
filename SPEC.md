@@ -1146,6 +1146,13 @@ Timeouts:
 - `codex.turn_timeout_ms`: total turn stream timeout
 - `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
+Remote-execution note:
+
+- Implementations that poll an external workflow runtime (for example Temporal) should also consume
+  `codex.stall_timeout_ms` while consecutive status checks fail, measuring from the last successful
+  poll or run start. Once the budget is exhausted, the attempt must fail instead of polling
+  indefinitely.
+
 Error mapping (recommended normalized categories):
 
 - `codex_not_found`
@@ -1250,6 +1257,9 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
+- If an implementation performs control-plane tracker writes for a remote run (for example syncing
+  an Org workpad or final Org state from run artifacts), those writes are strict: failures fail the
+  current attempt.
 - If the optional `linear_graphql` client-side tool extension is implemented, it is still part of
   the agent toolchain rather than orchestrator business logic.
 

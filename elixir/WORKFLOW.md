@@ -110,6 +110,8 @@ No workpad was synced from Org.
 3. Keep all progress in local artifacts under `./.symphony/`.
 4. The control plane will sync `./.symphony/workpad.md` back to the Org `Codex Workpad` heading after the run.
 5. The control plane will read `./.symphony/run-result.json` to decide the target Org state.
+6. If remote status checks exceed `codex.stall_timeout_ms` or the final Org sync fails, the control
+   plane will fail the run instead of silently retrying forever or dropping the error.
 
 ## Required local artifacts
 
