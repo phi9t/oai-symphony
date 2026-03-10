@@ -46,7 +46,8 @@ task through implementation, fork PR creation, merge, and `Done`. After the merg
 the Org workpad, Symphony removes the matching workspace on the next terminal cleanup pass; if a
 task reaches a terminal state without merge, the `before_remove` hook closes any leftover fork PRs
 before deleting the workspace. Remote runs also bound repeated Temporal status-check failures by
-`codex.stall_timeout_ms` and fail the attempt if the final Org sync cannot be written back.
+`codex.stall_timeout_ms`, fail the attempt if the final Org sync cannot be written back, and start
+each retry in a fresh Temporal workflow/K3s job attempt instead of reusing the prior remote IDs.
 
 The repository now also ships a repo-owned Temporal/K3s developer stack for the remote backend:
 
