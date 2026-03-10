@@ -75,6 +75,86 @@ defmodule SymphonyElixir.TemporalK3sTest do
     end
   end
 
+  defmodule StatefulRetryOrgClient do
+    alias SymphonyElixir.Config
+    alias SymphonyElixir.Tracker.Issue
+
+    def fetch_candidate_issues do
+      {:ok, filter_issues(issue_entries(), Config.tracker_active_states())}
+    end
+
+    def fetch_issues_by_states(states) do
+      {:ok, filter_issues(issue_entries(), states)}
+    end
+
+    def fetch_issue_states_by_ids(issue_ids) do
+      wanted_ids = MapSet.new(issue_ids)
+
+      {:ok,
+       Enum.filter(issue_entries(), fn %Issue{id: id} ->
+         MapSet.member?(wanted_ids, id)
+       end)}
+    end
+
+    def get_task(issue_id), do: {:ok, %{id: issue_id}}
+
+    def get_workpad(issue_id) do
+      notify({:org_get_workpad_called, issue_id})
+      {:ok, "workpad for #{issue_id}"}
+    end
+
+    def replace_workpad(issue_id, content) do
+      notify({:org_replace_workpad_called, issue_id, content})
+      {:ok, content}
+    end
+
+    def set_task_state(issue_id, state_name) do
+      Agent.update(store(), fn issues ->
+        Enum.map(issues, fn
+          %Issue{id: ^issue_id} = issue -> %{issue | state: state_name}
+          issue -> issue
+        end)
+      end)
+
+      notify({:org_set_task_state_called, issue_id, state_name})
+      {:ok, %{id: issue_id, state: state_name}}
+    end
+
+    defp issue_entries do
+      Agent.get(store(), & &1)
+    end
+
+    defp filter_issues(issues, states) do
+      normalized_states =
+        states
+        |> Enum.map(&normalize_state/1)
+        |> MapSet.new()
+
+      Enum.filter(issues, fn %Issue{state: state} ->
+        MapSet.member?(normalized_states, normalize_state(state))
+      end)
+    end
+
+    defp normalize_state(state) when is_binary(state) do
+      state
+      |> String.trim()
+      |> String.downcase()
+    end
+
+    defp normalize_state(_state), do: ""
+
+    defp store do
+      Application.fetch_env!(:symphony_elixir, :temporal_retry_issue_store)
+    end
+
+    defp notify(message) do
+      case Application.get_env(:symphony_elixir, :temporal_retry_test_recipient) do
+        pid when is_pid(pid) -> send(pid, message)
+        _ -> :ok
+      end
+    end
+  end
+
   setup do
     previous_org_client_module = Application.get_env(:symphony_elixir, :org_client_module)
 
@@ -473,6 +553,231 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert :ok = TemporalK3s.run(issue, self(), runner: runner)
 
     assert %{status_calls: 3} = Agent.get(runner_state, & &1)
+  end
+
+  test "Orchestrator retries a failed remote run with fresh workflow and job identifiers" do
+    Application.put_env(:symphony_elixir, :org_client_module, StatefulRetryOrgClient)
+    Application.put_env(:symphony_elixir, :temporal_retry_test_recipient, self())
+
+    {:ok, issue_store} =
+      Agent.start_link(fn ->
+        [
+          %Issue{
+            id: "issue-remote-orchestrated-retry",
+            identifier: "REV-15",
+            title: "Retry through orchestrator",
+            description: "Exercise the real retry path",
+            state: "In Progress"
+          }
+        ]
+      end)
+
+    Application.put_env(:symphony_elixir, :temporal_retry_issue_store, issue_store)
+
+    helper_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-orchestrator-retry-#{System.unique_integer([:positive])}"
+      )
+
+    helper_script = Path.join(helper_root, "fake-temporal-helper.py")
+    helper_trace = Path.join(helper_root, "temporal-helper-trace.jsonl")
+    k3s_project_root = Path.join(helper_root, "projects")
+
+    File.mkdir_p!(helper_root)
+    File.mkdir_p!(k3s_project_root)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :temporal_retry_test_recipient)
+      Application.delete_env(:symphony_elixir, :temporal_retry_issue_store)
+
+      if Process.alive?(issue_store) do
+        Agent.stop(issue_store)
+      end
+
+      File.rm_rf(helper_root)
+    end)
+
+    File.write!(
+      helper_script,
+      """
+      #!/usr/bin/env python3
+      import json
+      import os
+      import sys
+
+      def load_json(path):
+          with open(path, "r", encoding="utf-8") as handle:
+              return json.load(handle)
+
+      def write_json(path, payload):
+          with open(path, "w", encoding="utf-8") as handle:
+              json.dump(payload, handle)
+
+      def append_event(path, payload):
+          with open(path, "a", encoding="utf-8") as handle:
+              handle.write(json.dumps(payload) + "\\n")
+
+      def parse_input_path(argv):
+          for index, arg in enumerate(argv):
+              if arg == "--input":
+                  return argv[index + 1]
+          raise RuntimeError("--input argument missing")
+
+      subcommand = sys.argv[1]
+      payload = load_json(parse_input_path(sys.argv))
+      trace_path = os.environ["SYMPHONY_TEMPORAL_TRACE"]
+      state_path = trace_path + ".state.json"
+
+      if os.path.exists(state_path):
+          state = load_json(state_path)
+      else:
+          state = {"runs": []}
+
+      if subcommand == "run":
+          run_number = len(state["runs"]) + 1
+          run_id = "run-%03d" % run_number
+          run = {
+              "run_number": run_number,
+              "workflowId": payload["workflowId"],
+              "projectId": payload["projectId"],
+              "workspacePath": payload["paths"]["workspacePath"],
+              "artifactDir": payload["paths"]["outputsPath"],
+              "resultPath": payload["paths"]["resultPath"],
+              "jobName": "symphony-job-" + payload["projectId"],
+              "runId": run_id,
+          }
+          state["runs"].append(run)
+          write_json(state_path, state)
+          append_event(
+              trace_path,
+              {
+                  "event": "run",
+                  "workflowId": run["workflowId"],
+                  "projectId": run["projectId"],
+                  "jobName": run["jobName"],
+                  "runId": run["runId"],
+                  "workspacePath": run["workspacePath"],
+              },
+          )
+          print(
+              json.dumps(
+                  {
+                      "workflowId": run["workflowId"],
+                      "runId": run["runId"],
+                      "status": "queued",
+                      "projectId": run["projectId"],
+                      "workspacePath": run["workspacePath"],
+                      "artifactDir": run["artifactDir"],
+                      "jobName": run["jobName"],
+                  }
+              )
+          )
+      elif subcommand == "status":
+          run = next(item for item in state["runs"] if item["workflowId"] == payload["workflowId"])
+          append_event(
+              trace_path,
+              {
+                  "event": "status",
+                  "workflowId": run["workflowId"],
+                  "projectId": run["projectId"],
+                  "jobName": run["jobName"],
+                  "runId": payload.get("runId"),
+                  "run_number": run["run_number"],
+              },
+          )
+
+          if run["run_number"] == 1:
+              response = {
+                  "workflowId": run["workflowId"],
+                  "runId": run["runId"],
+                  "status": "failed",
+                  "projectId": run["projectId"],
+                  "workspacePath": run["workspacePath"],
+                  "artifactDir": run["artifactDir"],
+                  "jobName": run["jobName"],
+              }
+          else:
+              write_json(
+                  run["resultPath"],
+                  {
+                      "status": "succeeded",
+                      "targetState": "Done",
+                      "summary": "Orchestrator retry succeeded with fresh identifiers.",
+                      "validation": ["orchestrator retry identifier regression"],
+                      "blockedReason": None,
+                      "needsContinuation": False,
+                  },
+              )
+              response = {
+                  "workflowId": run["workflowId"],
+                  "runId": run["runId"],
+                  "status": "succeeded",
+                  "projectId": run["projectId"],
+                  "workspacePath": run["workspacePath"],
+                  "artifactDir": run["artifactDir"],
+                  "jobName": run["jobName"],
+              }
+
+          print(json.dumps(response))
+      else:
+          print(json.dumps({"workflowId": payload.get("workflowId"), "status": "unknown"}))
+      """
+    )
+
+    File.chmod!(helper_script, 0o755)
+    System.put_env("SYMPHONY_TEMPORAL_TRACE", helper_trace)
+    on_exit(fn -> System.delete_env("SYMPHONY_TEMPORAL_TRACE") end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_file: "/tmp/revision-plan.org",
+      tracker_root_id: "root-id",
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_helper_command: helper_script,
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_status_poll_ms: 1,
+      poll_interval_ms: 5_000,
+      max_retry_backoff_ms: 1,
+      k3s_project_root: k3s_project_root
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :RemoteRetryOrchestrator)
+
+    log =
+      capture_log(fn ->
+        {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+        on_exit(fn ->
+          if Process.alive?(pid) do
+            Process.exit(pid, :normal)
+          end
+        end)
+
+        assert_eventually(fn ->
+          match?({:ok, [_, _]}, orchestrated_retry_run_events(helper_trace))
+        end, 120)
+
+        assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"}, 1_000
+
+        assert {:ok, [first_run, second_run]} = orchestrated_retry_run_events(helper_trace)
+
+        assert first_run["workflowId"] == "issue/issue-remote-orchestrated-retry"
+        assert first_run["projectId"] == "REV-15"
+        assert first_run["jobName"] == "symphony-job-REV-15"
+
+        assert second_run["workflowId"] != first_run["workflowId"]
+        assert second_run["workflowId"] =~ "/attempt-1-"
+        assert second_run["projectId"] != first_run["projectId"]
+        assert String.starts_with?(second_run["projectId"], "REV-15-attempt-1-")
+        assert second_run["jobName"] != first_run["jobName"]
+        assert String.starts_with?(second_run["jobName"], "symphony-job-REV-15-attempt-1-")
+        assert second_run["workspacePath"] != first_run["workspacePath"]
+      end)
+
+    assert log =~ "scheduling retry"
   end
 
   test "TemporalK3s retry attempts create fresh workflow and job identifiers" do
@@ -1090,6 +1395,36 @@ defmodule SymphonyElixir.TemporalK3sTest do
   defp assert_temporal_connection_payload(payload) do
     assert temporal_connection_payload?(payload)
   end
+
+  defp orchestrated_retry_run_events(trace_path) do
+    if File.exists?(trace_path) do
+      runs =
+        trace_path
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.filter(&(&1["event"] == "run"))
+
+      if length(runs) >= 2 do
+        {:ok, Enum.take(runs, 2)}
+      else
+        :pending
+      end
+    else
+      :pending
+    end
+  end
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(25)
+      assert_eventually(fun, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
 
   defp temporal_connection_payload?(payload) do
     Map.take(payload["temporal"] || %{}, ["address", "namespace"]) == %{
