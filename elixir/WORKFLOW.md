@@ -48,6 +48,8 @@ k3s:
   ttl_seconds_after_finished: 86400
   default_cpu: "2"
   default_memory: "8Gi"
+  default_gpu_count: 0
+  runtime_class: null
 repository:
   origin_url: "https://github.com/openai/symphony.git"
   default_branch: "main"

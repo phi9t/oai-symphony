@@ -16,7 +16,7 @@ spec:
         app: symphony
         symphony/project-id: "${PROJECT_ID}"
         symphony/job-name: "${JOB_NAME}"
-    spec:
+    spec:${RUNTIME_CLASS_BLOCK}
       restartPolicy: Never
       containers:
         - name: agent
@@ -25,10 +25,10 @@ spec:
           resources:
             requests:
               cpu: "${CPU_REQUEST}"
-              memory: "${MEMORY_REQUEST}"
+              memory: "${MEMORY_REQUEST}"${GPU_REQUEST_BLOCK}
             limits:
               cpu: "${CPU_REQUEST}"
-              memory: "${MEMORY_REQUEST}"
+              memory: "${MEMORY_REQUEST}"${GPU_LIMIT_BLOCK}
           command: ["/bin/bash", "-lc", "${JOB_COMMAND}"]
           workingDir: /workspace
           volumeMounts:

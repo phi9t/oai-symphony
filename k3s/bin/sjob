@@ -16,6 +16,8 @@ NAMESPACE="symphony"
 IMAGE="symphony/agent:latest"
 CPU_REQUEST="2"
 MEMORY_REQUEST="8Gi"
+GPU_COUNT="0"
+RUNTIME_CLASS=""
 TTL_SECONDS_AFTER_FINISHED="86400"
 PROJECT_ROOT=""
 SHARED_CACHE_ROOT=""
@@ -25,7 +27,7 @@ JOB_COMMAND=""
 usage() {
     cat <<'EOF'
 Usage:
-  sjob run --project-id <id> --job <name> --project-root <path> --shared-cache-root <path> [--namespace <ns>] [--image <image>] [--cpu <cpu>] [--memory <mem>] [--ttl-seconds-after-finished <seconds>] -- <command>
+  sjob run --project-id <id> --job <name> --project-root <path> --shared-cache-root <path> [--namespace <ns>] [--image <image>] [--cpu <cpu>] [--memory <mem>] [--gpu-count <count>] [--runtime-class <name>] [--ttl-seconds-after-finished <seconds>] -- <command>
   sjob status --project-id <id> --job <name> [--namespace <ns>] [--output text|json]
   sjob stop --project-id <id> --job <name> [--namespace <ns>]
 EOF
@@ -44,6 +46,8 @@ parse_args() {
             --image) IMAGE="$2"; shift 2 ;;
             --cpu) CPU_REQUEST="$2"; shift 2 ;;
             --memory) MEMORY_REQUEST="$2"; shift 2 ;;
+            --gpu-count) GPU_COUNT="$2"; shift 2 ;;
+            --runtime-class) RUNTIME_CLASS="$2"; shift 2 ;;
             --ttl-seconds-after-finished) TTL_SECONDS_AFTER_FINISHED="$2"; shift 2 ;;
             --project-root) PROJECT_ROOT="$2"; shift 2 ;;
             --shared-cache-root) SHARED_CACHE_ROOT="$2"; shift 2 ;;
@@ -58,6 +62,37 @@ job_resource_name() {
     echo "symphony-job-${PROJECT_ID}-${JOB_NAME}"
 }
 
+yaml_double_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "${value}"
+}
+
+validate_non_negative_integer() {
+    local value="$1"
+    [[ "${value}" =~ ^[0-9]+$ ]]
+}
+
+prepare_manifest_vars() {
+    RUNTIME_CLASS_BLOCK=""
+    GPU_REQUEST_BLOCK=""
+    GPU_LIMIT_BLOCK=""
+
+    if [[ -n "${RUNTIME_CLASS}" ]]; then
+        local escaped_runtime_class
+        escaped_runtime_class="$(yaml_double_quote "${RUNTIME_CLASS}")"
+        printf -v RUNTIME_CLASS_BLOCK '\n      runtimeClassName: "%s"' "${escaped_runtime_class}"
+    fi
+
+    if [[ "${GPU_COUNT}" != "0" ]]; then
+        printf -v GPU_REQUEST_BLOCK '\n              nvidia.com/gpu: "%s"' "${GPU_COUNT}"
+        printf -v GPU_LIMIT_BLOCK '\n              nvidia.com/gpu: "%s"' "${GPU_COUNT}"
+    fi
+
+    export RUNTIME_CLASS_BLOCK GPU_REQUEST_BLOCK GPU_LIMIT_BLOCK
+}
+
 status_json() {
     local status="$1"
     printf '{"status":"%s","jobName":"%s"}\n' "${status}" "$(job_resource_name)"
@@ -66,13 +101,15 @@ status_json() {
 cmd_run() {
     [[ -n "${PROJECT_ID}" && -n "${JOB_NAME}" && -n "${PROJECT_ROOT}" && -n "${SHARED_CACHE_ROOT}" ]] || die "project-id, job, project-root, and shared-cache-root are required"
     [[ -n "${JOB_COMMAND}" ]] || die "missing job command"
+    validate_non_negative_integer "${GPU_COUNT}" || die "gpu-count must be a non-negative integer"
 
     check_kubectl
     check_envsubst
     ensure_dirs "${PROJECT_ROOT}"
 
     REPO_ROOT="$(cd "${K3S_ROOT}/.." && pwd)"
-    export PROJECT_ID JOB_NAME NAMESPACE IMAGE CPU_REQUEST MEMORY_REQUEST TTL_SECONDS_AFTER_FINISHED JOB_COMMAND PROJECT_ROOT SHARED_CACHE_ROOT REPO_ROOT
+    prepare_manifest_vars
+    export PROJECT_ID JOB_NAME NAMESPACE IMAGE CPU_REQUEST MEMORY_REQUEST GPU_COUNT RUNTIME_CLASS TTL_SECONDS_AFTER_FINISHED JOB_COMMAND PROJECT_ROOT SHARED_CACHE_ROOT REPO_ROOT
     export REPO_ROOT
 
     envsubst < "${K3S_ROOT}/templates/job.yaml" | kubectl_cmd apply -f -

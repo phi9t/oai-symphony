@@ -210,10 +210,15 @@ repository:
 k3s:
   project_root: $SYMPHONY_K3S_PROJECT_ROOT
   shared_cache_root: $SYMPHONY_K3S_SHARED_CACHE_ROOT
+  default_gpu_count: 0
+  runtime_class: null
 codex:
   command: "$CODEX_BIN exec --full-auto --json"
 ```
 
+- `k3s.default_gpu_count` sets `nvidia.com/gpu` requests and limits only when the value is greater
+  than zero.
+- `k3s.runtime_class` renders the Job `runtimeClassName` when set, and is omitted for CPU-only jobs.
 - If `WORKFLOW.md` is missing or has invalid YAML, startup and scheduling are halted until fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
