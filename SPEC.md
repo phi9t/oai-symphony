@@ -1180,6 +1180,9 @@ Behavior:
 Note:
 
 - Workspaces are intentionally preserved after successful runs.
+- If an implementation uses a remote workflow/job runtime (for example Temporal + K3s), an
+  orchestrator retry must start a fresh remote attempt with new durable workflow/job identifiers
+  rather than hiding retries behind one stable remote execution identity.
 
 ## 11. Issue Tracker Integration Contract
 
