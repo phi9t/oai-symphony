@@ -37,7 +37,8 @@ help with the setup:
 For this repository itself, the repo-local Org workflows live under [`.symphony/`](.symphony):
 `local-bootstrap-workflow.md` keeps local implementation runs in `Human Review`, while
 `fork-self-land-workflow.md` rewrites workspace remotes to `phi9t/oai-symphony` and requires
-`commit`, `push`, and `land` before `Done`.
+`commit`, `push`, and `land` before `Done`, with Codex runtime settings that allow unattended
+networked GitHub operations.
 
 The repository now also ships a repo-owned Temporal/K3s developer stack for the remote backend:
 

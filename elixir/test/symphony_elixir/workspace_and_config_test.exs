@@ -883,11 +883,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     after_create = get_in(config, ["hooks", "after_create"])
     before_remove = get_in(config, ["hooks", "before_remove"])
+    approval_policy = get_in(config, ["codex", "approval_policy"])
+    thread_sandbox = get_in(config, ["codex", "thread_sandbox"])
+    turn_sandbox_policy = get_in(config, ["codex", "turn_sandbox_policy"])
 
     assert after_create =~ "git remote set-url origin git@github.com:phi9t/oai-symphony.git"
     assert after_create =~ "git fetch origin main"
     assert after_create =~ ~S|git checkout -B "symphony/$(basename "$PWD")" origin/main|
     assert before_remove =~ "mix workspace.before_remove --repo phi9t/oai-symphony"
+    assert approval_policy == "never"
+    assert thread_sandbox == "workspace-write"
+    assert turn_sandbox_policy["type"] == "workspaceWrite"
+    assert turn_sandbox_policy["writableRoots"] == ["/mnt/data_infra/workspace/symphony/.symphony/workspaces"]
+    assert turn_sandbox_policy["networkAccess"] == true
 
     assert prompt =~ "Use the repo-local `commit`, `push`, and `land` skills before ending a successful task."
     assert prompt =~ "Successful tasks must be committed, pushed, landed, and then moved to `Done`."
@@ -948,6 +956,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "repo fork self-landing workflow enables unattended networked codex turns" do
+    original_workflow_path = Workflow.workflow_file_path()
+    workflow_path = repo_workflow_path!("fork-self-land-workflow.md")
+    workspace = Path.join("/tmp", "rev-6-networked-codex-workspace")
+
+    on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
+
+    :ok = Workflow.set_workflow_file_path(workflow_path)
+
+    assert {:ok, settings} = Config.codex_runtime_settings(workspace)
+    assert settings.approval_policy == "never"
+    assert settings.thread_sandbox == "workspace-write"
+
+    assert settings.turn_sandbox_policy == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => ["/mnt/data_infra/workspace/symphony/.symphony/workspaces"],
+             "readOnlyAccess" => %{"type" => "fullAccess"},
+             "networkAccess" => true,
+             "excludeTmpdirEnvVar" => false,
+             "excludeSlashTmp" => false
+           }
   end
 
   test "workflow prompt is used when building base prompt" do

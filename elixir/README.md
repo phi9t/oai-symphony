@@ -81,6 +81,8 @@ This repository also keeps two local Org workflows under `./.symphony/`:
 - `fork-self-land-workflow.md` runs the local backend against the same Org queue, rewrites each
   workspace so `origin` points at `git@github.com:phi9t/oai-symphony.git`, and requires the
   repo-local `commit`, `push`, and `land` skills before the task can move to `Done`.
+- The fork workflow also overrides the default Codex runtime settings so agent turns stay
+  workspace-scoped while still allowing networked GitHub operations needed for `push` and `land`.
 
 Start either workflow from the repository root:
 
