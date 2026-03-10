@@ -76,8 +76,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   @spec remove_issue_project(String.t()) :: :ok
   def remove_issue_project(identifier) when is_binary(identifier) do
     identifier
-    |> project_root()
-    |> File.rm_rf()
+    |> project_roots_for_identifier()
+    |> Enum.each(&File.rm_rf/1)
 
     :ok
   end
@@ -98,10 +98,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp prepare_project!(issue, opts) do
     identifier = issue.identifier || issue.id || "issue"
-    project_id = project_id(identifier)
-    project_root = project_root(identifier)
-    workspace_path = Path.join(project_root, "workspace")
-    outputs_path = Path.join(project_root, "outputs")
+    attempt = normalize_run_attempt(Keyword.get(opts, :attempt))
 
     run_hint =
       Keyword.get(
@@ -109,6 +106,11 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
         :run_hint,
         Integer.to_string(System.unique_integer([:positive, :monotonic]))
       )
+
+    project_id = project_id(identifier, attempt, run_hint)
+    project_root = project_root(identifier, attempt, run_hint)
+    workspace_path = Path.join(project_root, "workspace")
+    outputs_path = Path.join(project_root, "outputs")
 
     for path <- [
           project_root,
@@ -122,6 +124,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
     %{
       identifier: identifier,
+      attempt: attempt,
       project_id: project_id,
       project_root: project_root,
       workspace_path: workspace_path,
@@ -174,7 +177,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp temporal_run_payload(issue, project, input) do
     %{
-      "workflowId" => workflow_id(issue),
+      "workflowId" => workflow_id(issue, project),
       "projectId" => project.project_id,
       "repository" => %{
         "originUrl" => Config.repository_origin_url(),
@@ -444,12 +447,51 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp workflow_id(_issue), do: "issue/unknown"
 
-  defp project_root(identifier) do
-    Path.join(Config.k3s_project_root(), project_id(identifier))
+  defp workflow_id(issue, %{attempt: attempt, run_hint: run_hint})
+       when is_integer(attempt) and attempt > 0 and is_binary(run_hint) do
+    workflow_id(issue) <> "/attempt-#{attempt}-#{safe_identifier(run_hint)}"
   end
 
-  defp project_id(identifier) do
+  defp workflow_id(issue, _project), do: workflow_id(issue)
+
+  defp project_root(identifier, attempt \\ nil, run_hint \\ nil) do
+    Path.join(Config.k3s_project_root(), project_id(identifier, attempt, run_hint))
+  end
+
+  defp project_id(identifier, attempt, run_hint)
+       when is_integer(attempt) and attempt > 0 and is_binary(run_hint) do
+    base_project_id(identifier) <> "-attempt-#{attempt}-#{safe_identifier(run_hint)}"
+  end
+
+  defp project_id(identifier, _attempt, _run_hint) do
+    base_project_id(identifier)
+  end
+
+  defp base_project_id(identifier) do
     safe_identifier(identifier || "issue")
+  end
+
+  defp project_roots_for_identifier(identifier) do
+    project_root = Config.k3s_project_root()
+    base_project_id = base_project_id(identifier)
+    fallback_root = Path.join(project_root, base_project_id)
+
+    case File.ls(project_root) do
+      {:ok, entries} ->
+        matches =
+          entries
+          |> Enum.filter(&project_root_entry_for_issue?(&1, base_project_id))
+          |> Enum.map(&Path.join(project_root, &1))
+
+        if matches == [], do: [fallback_root], else: matches
+
+      {:error, _reason} ->
+        [fallback_root]
+    end
+  end
+
+  defp project_root_entry_for_issue?(entry, base_project_id) do
+    entry == base_project_id || String.starts_with?(entry, base_project_id <> "-attempt-")
   end
 
   defp temporal_request_payload(workflow_id, run_id \\ nil) when is_binary(workflow_id) do
@@ -537,6 +579,9 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp safe_identifier(identifier) do
     String.replace(identifier, ~r/[^a-zA-Z0-9._-]/, "_")
   end
+
+  defp normalize_run_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
+  defp normalize_run_attempt(_attempt), do: nil
 
   defp string_value(value) when is_binary(value) do
     case String.trim(value) do

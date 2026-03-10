@@ -15,8 +15,8 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 1. Polls the configured tracker for candidate work
 2. Renders a repo-owned prompt plus the current Org workpad snapshot
-3. Starts or resumes a Temporal workflow for the task
-4. Runs Codex inside a K3s job backed by a stable per-task project workspace
+3. Starts or retries a Temporal workflow for the task
+4. Runs Codex inside a K3s job, with each retry creating a fresh workflow and project attempt
 5. Syncs `.symphony/workpad.md` and `.symphony/run-result.json` back into Org
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
@@ -210,6 +210,8 @@ Notes:
 - The remote backend requires a Temporal helper command plus `repository.origin_url`.
 - `temporal.address` and `temporal.namespace` are forwarded to helper `run`, `status`, `cancel`,
   and `describe` requests, so remote lifecycle operations stay on the same Temporal cluster.
+- When Symphony retries a remote attempt, it generates a fresh `workflowId`, `projectId`, and K3s
+  job name instead of reusing the previous durable identifiers.
 - The shipped remote workflow does not rely on `org_task`; Org updates are applied by Symphony after the job completes.
 - Consecutive remote `status` failures consume the same `codex.stall_timeout_ms` budget used for
   stall detection; once the budget is exhausted, Symphony fails the run instead of polling forever.

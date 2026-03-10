@@ -78,7 +78,8 @@ You are working on an Org task `{{ issue.identifier }}`.
 Continuation context:
 
 - This is retry attempt #{{ attempt }} because the task is still in an active state.
-- Resume from the current workspace and `.symphony` artifacts instead of restarting from scratch.
+- Each retry starts in a fresh remote workflow/job attempt.
+- Rebuild context from the synced workpad and repository state instead of assuming the prior remote workspace still exists.
 - Do not repeat already-completed investigation or validation unless the repo state changed.
 {% endif %}
 
