@@ -1,4 +1,9 @@
 ---
+# Repo-local Symphony workflows for this repository live under `../.symphony/`.
+# `local-bootstrap-workflow.md` is the supervised local path.
+# `fork-self-land-workflow.md` rewrites workspace remotes to
+# `git@github.com:phi9t/oai-symphony.git` and requires `commit`, `push`,
+# and `land` before a task can move to `Done`.
 tracker:
   kind: orgmode
   file: "$SYMPHONY_ORG_FILE"

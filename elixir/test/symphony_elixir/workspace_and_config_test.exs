@@ -876,10 +876,117 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
   end
 
+  test "repo fork self-landing workflow pins the fork landing contract" do
+    workflow_path = repo_workflow_path!("fork-self-land-workflow.md")
+
+    assert {:ok, %{config: config, prompt_template: prompt}} = Workflow.load(workflow_path)
+
+    after_create = get_in(config, ["hooks", "after_create"])
+    before_remove = get_in(config, ["hooks", "before_remove"])
+
+    assert after_create =~ "git remote set-url origin git@github.com:phi9t/oai-symphony.git"
+    assert after_create =~ "git fetch origin main"
+    assert after_create =~ ~S|git checkout -B "symphony/$(basename "$PWD")" origin/main|
+    assert before_remove =~ "mix workspace.before_remove --repo phi9t/oai-symphony"
+
+    assert prompt =~ "Use the repo-local `commit`, `push`, and `land` skills before ending a successful task."
+    assert prompt =~ "Successful tasks must be committed, pushed, landed, and then moved to `Done`."
+
+    assert prompt =~
+             "Once the merge is complete, record the PR URL and merge commit in the workpad and set the task state to `Done`."
+  end
+
+  test "repo fork self-landing workflow bootstrap rewrites remotes in a new workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fork-self-land-bootstrap-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_git_log = System.get_env("GIT_LOG")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("GIT_LOG", previous_git_log)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      fake_bin = Path.join(test_root, "bin")
+      git_log = Path.join(test_root, "git.log")
+      workflow_path = Path.join(test_root, "WORKFLOW.md")
+
+      File.mkdir_p!(workspace_root)
+      File.mkdir_p!(fake_bin)
+      write_fake_git!(Path.join(fake_bin, "git"))
+
+      workflow =
+        repo_workflow_path!("fork-self-land-workflow.md")
+        |> File.read!()
+        |> String.replace(
+          ~s(root: "/mnt/data_infra/workspace/symphony/.symphony/workspaces"),
+          ~s(root: "#{workspace_root}")
+        )
+
+      File.write!(workflow_path, workflow)
+      Workflow.set_workflow_file_path(workflow_path)
+
+      System.put_env("PATH", fake_bin <> ":" <> (previous_path || ""))
+      System.put_env("GIT_LOG", git_log)
+
+      assert {:ok, workspace} = Workspace.create_for_issue("REV-6")
+      assert File.exists?(Path.join(workspace, "README.md"))
+
+      log = File.read!(git_log)
+
+      assert log =~ "remote set-url origin git@github.com:phi9t/oai-symphony.git"
+      assert log =~ "remote get-url upstream"
+      assert log =~ "remote add upstream https://github.com/openai/symphony.git"
+      assert log =~ "fetch origin main"
+      assert log =~ "checkout -B symphony/REV-6 origin/main"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workflow prompt is used when building base prompt" do
     workflow_prompt = "Workflow prompt body used as codex instruction."
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
     assert Config.workflow_prompt() == workflow_prompt
+  end
+
+  defp repo_workflow_path!(name) do
+    path =
+      Path.join([
+        Path.expand("../../..", __DIR__),
+        ".symphony",
+        name
+      ])
+
+    if File.regular?(path) do
+      path
+    else
+      raise "expected repo workflow file at #{path}"
+    end
+  end
+
+  defp write_fake_git!(path) do
+    File.write!(
+      path,
+      """
+      #!/bin/sh
+      printf '%s\n' "$*" >> "$GIT_LOG"
+
+      if [ "$1" = "remote" ] && [ "$2" = "get-url" ] && [ "$3" = "upstream" ]; then
+        exit 1
+      fi
+
+      exit 0
+      """
+    )
+
+    File.chmod!(path, 0o755)
   end
 end

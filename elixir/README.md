@@ -72,6 +72,23 @@ When you are done with the remote backend, tear it down with:
 ./dev/temporal-k3s down
 ```
 
+## Repo-local Org workflows
+
+This repository also keeps two local Org workflows under `./.symphony/`:
+
+- `local-bootstrap-workflow.md` runs the local backend against the repo's Org queue and is intended
+  for supervised bootstrap tasks that stop in `Human Review`.
+- `fork-self-land-workflow.md` runs the local backend against the same Org queue, rewrites each
+  workspace so `origin` points at `git@github.com:phi9t/oai-symphony.git`, and requires the
+  repo-local `commit`, `push`, and `land` skills before the task can move to `Done`.
+
+Start either workflow from the repository root:
+
+```bash
+mise exec -- ./elixir/bin/symphony ./.symphony/local-bootstrap-workflow.md
+mise exec -- ./elixir/bin/symphony ./.symphony/fork-self-land-workflow.md
+```
+
 ## Remote Backend Dev Stack
 
 The repository now ships `./dev/temporal-k3s`, which provides a repeatable local bring-up path for
