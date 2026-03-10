@@ -69,6 +69,9 @@ codex:
   command: codex exec --full-auto --json
 ---
 
+The configured `temporal.address` and `temporal.namespace` apply to helper `run`, `status`,
+`cancel`, and `describe` requests.
+
 You are working on an Org task `{{ issue.identifier }}`.
 
 {% if attempt %}

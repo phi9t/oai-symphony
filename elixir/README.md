@@ -208,6 +208,8 @@ Notes:
 - If a value is missing, defaults are used.
 - `execution.kind: temporal_k3s` enables the new remote backend; `local` keeps the original host-local runner.
 - The remote backend requires a Temporal helper command plus `repository.origin_url`.
+- `temporal.address` and `temporal.namespace` are forwarded to helper `run`, `status`, `cancel`,
+  and `describe` requests, so remote lifecycle operations stay on the same Temporal cluster.
 - The shipped remote workflow does not rely on `org_task`; Org updates are applied by Symphony after the job completes.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`

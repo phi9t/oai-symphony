@@ -27,6 +27,32 @@ defmodule SymphonyElixir.TemporalCliTest do
              TemporalCli.describe("issue/1", runner: runner)
   end
 
+  test "TemporalCli forwards Temporal connection payloads for non-run subcommands" do
+    runner = fn _command, subcommand, payload ->
+      {:ok,
+       Jason.encode!(%{
+         "subcommand" => subcommand,
+         "workflowId" => Map.get(payload, "workflowId"),
+         "runId" => Map.get(payload, "runId"),
+         "temporal" => Map.get(payload, "temporal")
+       })}
+    end
+
+    temporal = %{"address" => "temporal.example:7233", "namespace" => "customer-a"}
+    status_payload = %{"workflowId" => "issue/1", "runId" => "run-001", "temporal" => temporal}
+    cancel_payload = %{"workflowId" => "issue/1", "temporal" => temporal}
+    describe_payload = %{"workflowId" => "issue/1", "runId" => "run-001", "temporal" => temporal}
+
+    assert {:ok, %{"subcommand" => "status", "temporal" => ^temporal, "runId" => "run-001"}} =
+             TemporalCli.status(status_payload, runner: runner)
+
+    assert {:ok, %{"subcommand" => "cancel", "temporal" => ^temporal}} =
+             TemporalCli.cancel(cancel_payload, runner: runner)
+
+    assert {:ok, %{"subcommand" => "describe", "temporal" => ^temporal, "runId" => "run-001"}} =
+             TemporalCli.describe(describe_payload, runner: runner)
+  end
+
   test "TemporalCli reports malformed helper output" do
     runner = fn _command, _subcommand, _payload -> {:ok, "not-json"} end
     assert {:error, _reason} = TemporalCli.run(%{"workflowId" => "issue/2"}, runner: runner)

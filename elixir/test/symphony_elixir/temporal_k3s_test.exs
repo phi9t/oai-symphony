@@ -61,6 +61,8 @@ defmodule SymphonyElixir.TemporalK3sTest do
       tracker_root_id: "root-id",
       execution_kind: "temporal_k3s",
       repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
       temporal_status_poll_ms: 1,
       k3s_project_root: k3s_project_root
     )
@@ -99,7 +101,8 @@ defmodule SymphonyElixir.TemporalK3sTest do
           result_path: nil,
           workspace_path: nil,
           outputs_path: nil,
-          status_calls: 0
+          status_calls: 0,
+          status_payloads: []
         }
       end)
 
@@ -121,6 +124,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
           assert File.read!(workpad_path) == "workpad for issue-remote"
           assert File.read!(issue_path) =~ ~s("identifier": "REV-11")
           assert get_in(payload, ["repository", "originUrl"]) == "https://example.com/repo.git"
+          assert_temporal_connection_payload(payload)
 
           Agent.update(runner_state, fn state ->
             %{
@@ -149,6 +153,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
             call_number = state.status_calls + 1
 
             assert payload["workflowId"] == "issue/issue-remote"
+            assert_temporal_connection_payload(payload)
 
             expected_run_id =
               case call_number do
@@ -208,7 +213,13 @@ defmodule SymphonyElixir.TemporalK3sTest do
                   }
               end
 
-            {{:ok, Jason.encode!(status)}, %{state | status_calls: call_number}}
+            updated_state = %{
+              state
+              | status_calls: call_number,
+                status_payloads: [payload | state.status_payloads]
+            }
+
+            {{:ok, Jason.encode!(status)}, updated_state}
           end)
       end
     end
@@ -240,8 +251,29 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert_receive {:org_replace_workpad_called, "issue-remote", ^final_workpad}
     assert_receive {:org_set_task_state_called, "issue-remote", "Done"}
 
-    assert %{status_calls: 3} = Agent.get(runner_state, & &1)
+    assert %{status_calls: 3, status_payloads: status_payloads} = Agent.get(runner_state, & &1)
+    assert length(status_payloads) == 3
+    assert Enum.all?(status_payloads, &temporal_connection_payload?/1)
     refute_receive {:codex_worker_update, "issue-remote", _}, 20
+  end
+
+  test "TemporalK3s cancel propagates configured Temporal connection settings" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      execution_kind: "temporal_k3s",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a"
+    )
+
+    runner = fn _command, subcommand, payload ->
+      send(self(), {:temporal_helper_called, subcommand, payload})
+      {:ok, Jason.encode!(%{"workflowId" => payload["workflowId"], "status" => "cancelled"})}
+    end
+
+    assert :ok = TemporalK3s.cancel(%{workflow_id: "issue/issue-remote"}, runner: runner)
+
+    assert_receive {:temporal_helper_called, "cancel", payload}
+    assert payload["workflowId"] == "issue/issue-remote"
+    assert_temporal_connection_payload(payload)
   end
 
   test "orchestrator snapshots and presenter keep remote helper metadata" do
@@ -391,5 +423,16 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert update.payload.method == "temporal/status"
     assert update.payload.params["status"] == expected_status
     assert update.payload.params["runId"] == expected_run_id
+  end
+
+  defp assert_temporal_connection_payload(payload) do
+    assert temporal_connection_payload?(payload)
+  end
+
+  defp temporal_connection_payload?(payload) do
+    Map.take(payload["temporal"] || %{}, ["address", "namespace"]) == %{
+      "address" => "temporal.example:7233",
+      "namespace" => "customer-a"
+    }
   end
 end

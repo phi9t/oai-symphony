@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,16 +14,31 @@ import (
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
+	workflowservice "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 
 	"symphony-temporal/internal/activities"
 	"symphony-temporal/internal/workflows"
 )
 
-type statusInput struct {
-	WorkflowID string `json:"workflowId"`
-	RunID      string `json:"runId"`
+type workflowInput struct {
+	WorkflowID string                    `json:"workflowId"`
+	RunID      string                    `json:"runId"`
+	Temporal   activities.TemporalConfig `json:"temporal"`
 }
+
+type temporalClient interface {
+	ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow interface{}, args ...interface{}) (client.WorkflowRun, error)
+	DescribeWorkflowExecution(ctx context.Context, workflowID string, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
+	CancelWorkflow(ctx context.Context, workflowID string, runID string) error
+	Close()
+}
+
+var dialTemporalClient = func(options client.Options) (temporalClient, error) {
+	return client.Dial(options)
+}
+
+var outputWriter io.Writer = os.Stdout
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -75,7 +91,7 @@ func runCommand(args []string) error {
 		return err
 	}
 
-	c, err := dialTemporal(input)
+	c, err := dialTemporal(input.Temporal)
 	if err != nil {
 		return err
 	}
@@ -128,7 +144,7 @@ func statusCommand(args []string) error {
 		return errors.New("--input is required")
 	}
 
-	var input statusInput
+	var input workflowInput
 	if err := readJSON(*inputPath, &input); err != nil {
 		return err
 	}
@@ -137,9 +153,7 @@ func statusCommand(args []string) error {
 		return errors.New("workflowId is required")
 	}
 
-	address := envOr("TEMPORAL_ADDRESS", "localhost:7233")
-	namespace := envOr("TEMPORAL_NAMESPACE", "default")
-	c, err := client.Dial(client.Options{HostPort: address, Namespace: namespace})
+	c, err := dialTemporal(input.Temporal)
 	if err != nil {
 		return fmt.Errorf("unable to create Temporal client: %w", err)
 	}
@@ -177,7 +191,7 @@ func cancelCommand(args []string) error {
 		return errors.New("--input is required")
 	}
 
-	var input statusInput
+	var input workflowInput
 	if err := readJSON(*inputPath, &input); err != nil {
 		return err
 	}
@@ -186,9 +200,7 @@ func cancelCommand(args []string) error {
 		return errors.New("workflowId is required")
 	}
 
-	address := envOr("TEMPORAL_ADDRESS", "localhost:7233")
-	namespace := envOr("TEMPORAL_NAMESPACE", "default")
-	c, err := client.Dial(client.Options{HostPort: address, Namespace: namespace})
+	c, err := dialTemporal(input.Temporal)
 	if err != nil {
 		return fmt.Errorf("unable to create Temporal client: %w", err)
 	}
@@ -226,23 +238,27 @@ func printJSON(outputKind string, payload map[string]any) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(string(data))
-		return nil
+		_, err = fmt.Fprintln(outputWriter, string(data))
+		return err
 	default:
 		return fmt.Errorf("unsupported output format %q", outputKind)
 	}
 }
 
-func dialTemporal(input activities.RunInput) (client.Client, error) {
-	address := input.Temporal.Address
+func dialTemporal(input activities.TemporalConfig) (temporalClient, error) {
+	return dialTemporalClient(temporalClientOptions(input))
+}
+
+func temporalClientOptions(input activities.TemporalConfig) client.Options {
+	address := input.Address
 	if strings.TrimSpace(address) == "" {
 		address = envOr("TEMPORAL_ADDRESS", "localhost:7233")
 	}
-	namespace := input.Temporal.Namespace
+	namespace := input.Namespace
 	if strings.TrimSpace(namespace) == "" {
 		namespace = envOr("TEMPORAL_NAMESPACE", "default")
 	}
-	return client.Dial(client.Options{HostPort: address, Namespace: namespace})
+	return client.Options{HostPort: address, Namespace: namespace}
 }
 
 func workflowStatus(status enumspb.WorkflowExecutionStatus) string {
