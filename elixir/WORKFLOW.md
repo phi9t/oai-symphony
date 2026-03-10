@@ -5,6 +5,10 @@
 # `git@github.com:phi9t/oai-symphony.git`, enables networked Codex turns
 # for GitHub operations, and requires `commit`, `push`, and `land`
 # before a task can move to `Done`.
+# In a self-landing setup, only emit `targetState: "Done"` after the PR has
+# actually merged. Once the tracker reflects that terminal state, Symphony
+# removes the matching workspace; if `hooks.before_remove` is configured, it
+# runs first so stale PRs can be closed before deletion.
 tracker:
   kind: orgmode
   file: "$SYMPHONY_ORG_FILE"
