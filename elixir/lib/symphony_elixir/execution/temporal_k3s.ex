@@ -46,17 +46,21 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
       {:error, reason} ->
         Logger.error("Temporal/K3s run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Temporal/K3s run failed for #{issue_context(issue)}: #{inspect(reason)}"
+
+        raise RuntimeError,
+              "Temporal/K3s run failed for #{issue_context(issue)}: #{inspect(reason)}"
     end
   end
 
-  @spec cancel(map()) :: :ok | {:error, term()}
-  def cancel(running_entry) when is_map(running_entry) do
+  @spec cancel(map(), keyword()) :: :ok | {:error, term()}
+  def cancel(running_entry, opts \\ [])
+
+  def cancel(running_entry, opts) when is_map(running_entry) do
     workflow_id = Map.get(running_entry, :workflow_id)
 
     case workflow_id do
       workflow_id when is_binary(workflow_id) ->
-        case TemporalCli.cancel(workflow_id, cli_opts([])) do
+        case TemporalCli.cancel(temporal_request_payload(workflow_id), cli_opts(opts)) do
           {:ok, _payload} -> :ok
           {:error, reason} -> {:error, reason}
         end
@@ -66,7 +70,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     end
   end
 
-  def cancel(_running_entry), do: :ok
+  def cancel(_running_entry, _opts), do: :ok
 
   @spec remove_issue_project(String.t()) :: :ok
   def remove_issue_project(identifier) when is_binary(identifier) do
@@ -97,9 +101,21 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     project_root = project_root(identifier)
     workspace_path = Path.join(project_root, "workspace")
     outputs_path = Path.join(project_root, "outputs")
-    run_hint = Keyword.get(opts, :run_hint, Integer.to_string(System.unique_integer([:positive, :monotonic])))
 
-    for path <- [project_root, workspace_path, outputs_path, Path.join(project_root, "home"), Path.join(project_root, "config")] do
+    run_hint =
+      Keyword.get(
+        opts,
+        :run_hint,
+        Integer.to_string(System.unique_integer([:positive, :monotonic]))
+      )
+
+    for path <- [
+          project_root,
+          workspace_path,
+          outputs_path,
+          Path.join(project_root, "home"),
+          Path.join(project_root, "config")
+        ] do
       File.mkdir_p!(path)
     end
 
@@ -166,11 +182,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       "codex" => %{
         "command" => Config.codex_command()
       },
-      "temporal" => %{
-        "address" => Config.temporal_address(),
-        "namespace" => Config.temporal_namespace(),
-        "taskQueue" => Config.temporal_task_queue()
-      },
+      "temporal" =>
+        Map.put(temporal_connection_payload(), "taskQueue", Config.temporal_task_queue()),
       "k3s" => %{
         "namespace" => Config.k3s_namespace(),
         "image" => Config.k3s_image(),
@@ -209,7 +222,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms) do
     Process.sleep(poll_ms)
 
-    case TemporalCli.status(%{"workflowId" => run_state.workflow_id, "runId" => run_state.run_id}, cli_opts) do
+    case TemporalCli.status(
+           temporal_request_payload(run_state.workflow_id, run_state.run_id),
+           cli_opts
+         ) do
       {:ok, status} ->
         updated_state = update_run_state(run_state, status)
         emit_status_update(recipient, issue, updated_state, status)
@@ -229,7 +245,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
         end
 
       {:error, reason} ->
-        Logger.warning("Temporal/K3s status check failed for #{issue_context(issue)}: #{inspect(reason)}")
+        Logger.warning(
+          "Temporal/K3s status check failed for #{issue_context(issue)}: #{inspect(reason)}"
+        )
+
         do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms)
     end
   end
@@ -252,7 +271,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       | status: normalized_workflow_status(status),
         job_name: string_value(Map.get(status, "jobName")) || run_state.job_name,
         artifact_dir: string_value(Map.get(status, "artifactDir")) || run_state.artifact_dir,
-        workspace_path: string_value(Map.get(status, "workspacePath")) || run_state.workspace_path,
+        workspace_path:
+          string_value(Map.get(status, "workspacePath")) || run_state.workspace_path,
         run_id: string_value(Map.get(status, "runId")) || run_state.run_id
     }
   end
@@ -268,7 +288,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
     case {normalized_workflow_status(status), run_result} do
       {status_name, %{} = result} when status_name in ["succeeded", "failed", "cancelled"] ->
-        if allowed_target_state?(Map.get(result, "targetState")) or Map.has_key?(result, "needsContinuation") do
+        if allowed_target_state?(Map.get(result, "targetState")) or
+             Map.has_key?(result, "needsContinuation") do
           :ok
         else
           raise RuntimeError,
@@ -295,7 +316,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp maybe_replace_org_workpad(_issue, _content), do: :ok
 
-  defp maybe_apply_run_result_state(%Issue{id: issue_id}, %{} = result) when is_binary(issue_id) do
+  defp maybe_apply_run_result_state(%Issue{id: issue_id}, %{} = result)
+       when is_binary(issue_id) do
     if Config.tracker_kind() == "orgmode" do
       target_state =
         case string_value(Map.get(result, "targetState")) do
@@ -386,7 +408,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp workflow_id(%Issue{id: issue_id}) when is_binary(issue_id), do: "issue/#{issue_id}"
-  defp workflow_id(%Issue{identifier: identifier}) when is_binary(identifier), do: "issue/#{safe_identifier(identifier)}"
+
+  defp workflow_id(%Issue{identifier: identifier}) when is_binary(identifier),
+    do: "issue/#{safe_identifier(identifier)}"
+
   defp workflow_id(_issue), do: "issue/unknown"
 
   defp project_root(identifier) do
@@ -396,6 +421,27 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp project_id(identifier) do
     safe_identifier(identifier || "issue")
   end
+
+  defp temporal_request_payload(workflow_id, run_id \\ nil) when is_binary(workflow_id) do
+    %{
+      "workflowId" => workflow_id,
+      "temporal" => temporal_connection_payload()
+    }
+    |> maybe_put_run_id(run_id)
+  end
+
+  defp temporal_connection_payload do
+    %{
+      "address" => Config.temporal_address(),
+      "namespace" => Config.temporal_namespace()
+    }
+  end
+
+  defp maybe_put_run_id(payload, run_id) when is_binary(run_id) do
+    Map.put(payload, "runId", run_id)
+  end
+
+  defp maybe_put_run_id(payload, _run_id), do: payload
 
   defp session_id(run) do
     workflow_id = Map.get(run, "workflowId") || "issue/unknown"
