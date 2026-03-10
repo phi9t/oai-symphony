@@ -49,6 +49,9 @@ The repository now also ships a repo-owned Temporal/K3s developer stack for the 
 ./dev/temporal-k3s down
 ```
 
+The remote K3s workflow also supports optional `k3s.default_gpu_count` and `k3s.runtime_class`
+settings for GPU-backed jobs without changing CPU-only manifests.
+
 See [elixir/README.md](elixir/README.md) for the detailed bring-up, health-check, and teardown
 workflow.
 

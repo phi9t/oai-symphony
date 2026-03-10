@@ -106,19 +106,7 @@ func RunIssueJob(ctx context.Context, input RunInput) (RunResult, error) {
 	}
 
 	command := buildJobCommand(input)
-	if _, err := runCommand(ctx, sjobPath, []string{
-		"run",
-		"--project-id", input.ProjectID,
-		"--job", jobName,
-		"--namespace", input.K3s.Namespace,
-		"--image", input.K3s.Image,
-		"--cpu", fallback(input.K3s.DefaultCPU, "2"),
-		"--memory", fallback(input.K3s.DefaultMemory, "8Gi"),
-		"--ttl-seconds-after-finished", strconv.Itoa(ttlSecondsAfterFinished(input.K3s.TTLSecondsAfterFinished)),
-		"--project-root", input.K3s.ProjectRoot,
-		"--shared-cache-root", input.K3s.SharedCacheRoot,
-		"--", command,
-	}); err != nil {
+	if _, err := runCommand(ctx, sjobPath, sjobRunArgs(input, jobName, command)); err != nil {
 		return RunResult{}, err
 	}
 
@@ -230,6 +218,28 @@ func buildJobCommand(input RunInput) string {
 	return strings.Join(append(envAssignments, "/opt/symphony/k3s/bin/run-agent-job"), " ")
 }
 
+func sjobRunArgs(input RunInput, jobName, command string) []string {
+	args := []string{
+		"run",
+		"--project-id", input.ProjectID,
+		"--job", jobName,
+		"--namespace", input.K3s.Namespace,
+		"--image", input.K3s.Image,
+		"--cpu", fallback(input.K3s.DefaultCPU, "2"),
+		"--memory", fallback(input.K3s.DefaultMemory, "8Gi"),
+		"--gpu-count", strconv.Itoa(gpuCount(input.K3s.DefaultGPUCount)),
+		"--ttl-seconds-after-finished", strconv.Itoa(ttlSecondsAfterFinished(input.K3s.TTLSecondsAfterFinished)),
+		"--project-root", input.K3s.ProjectRoot,
+		"--shared-cache-root", input.K3s.SharedCacheRoot,
+	}
+
+	if runtimeClass := strings.TrimSpace(input.K3s.RuntimeClass); runtimeClass != "" {
+		args = append(args, "--runtime-class", runtimeClass)
+	}
+
+	return append(args, "--", command)
+}
+
 func runCommand(ctx context.Context, binary string, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, binary, args...)
 	output, err := cmd.CombinedOutput()
@@ -249,6 +259,13 @@ func fallback(value, fallbackValue string) string {
 func ttlSecondsAfterFinished(value int) int {
 	if value <= 0 {
 		return 86400
+	}
+	return value
+}
+
+func gpuCount(value int) int {
+	if value < 0 {
+		return 0
 	}
 	return value
 }
