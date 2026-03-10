@@ -91,6 +91,37 @@ mise exec -- ./elixir/bin/symphony ./.symphony/local-bootstrap-workflow.md
 mise exec -- ./elixir/bin/symphony ./.symphony/fork-self-land-workflow.md
 ```
 
+## Self-Landing Queue Smoke
+
+Use the fork workflow when you want Symphony to implement the task, push to
+`phi9t/oai-symphony`, land the PR, mark the Org task `Done`, and then clean up the workspace.
+
+Run the queue from the repository root:
+
+```bash
+mise exec -- ./elixir/bin/symphony ./.symphony/fork-self-land-workflow.md
+```
+
+Smoke path:
+
+1. Create a repo task under `.symphony/revision-plan.org` or move an existing task to `Todo`.
+2. Wait for Symphony to claim the task, open a fork PR, and land it through the repo-local
+   `commit`, `push`, and `land` skills.
+3. Confirm the Org `Codex Workpad` now includes the PR URL plus merge commit and that the task
+   state is `Done`.
+4. Confirm the workspace is gone, for example with
+   `find ./.symphony/workspaces -maxdepth 1 -type d -name '<task-identifier>'`.
+
+Cleanup behavior:
+
+- A successful self-landing run writes `targetState: "Done"` into `.symphony/run-result.json`. Once
+  Symphony observes that terminal state, it removes the matching workspace during terminal-state
+  reconciliation or on the next startup cleanup sweep.
+- If the task reaches a terminal state without merge, the configured `hooks.before_remove` command
+  still runs before deletion. In this repository's fork workflow that hook executes
+  `mix workspace.before_remove --repo phi9t/oai-symphony` so any open fork PRs for the branch are
+  closed before the workspace disappears.
+
 ## Remote Backend Dev Stack
 
 The repository now ships `./dev/temporal-k3s`, which provides a repeatable local bring-up path for

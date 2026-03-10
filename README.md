@@ -40,6 +40,13 @@ For this repository itself, the repo-local Org workflows live under [`.symphony/
 `commit`, `push`, and `land` before `Done`, with Codex runtime settings that allow unattended
 networked GitHub operations.
 
+To smoke the self-landing queue in this repository, start Symphony with
+`./.symphony/fork-self-land-workflow.md`, move an Org task to `Todo`, and let the queue drive the
+task through implementation, fork PR creation, merge, and `Done`. After the merge is recorded in
+the Org workpad, Symphony removes the matching workspace on the next terminal cleanup pass; if a
+task reaches a terminal state without merge, the `before_remove` hook closes any leftover fork PRs
+before deleting the workspace.
+
 The repository now also ships a repo-owned Temporal/K3s developer stack for the remote backend:
 
 ```bash
