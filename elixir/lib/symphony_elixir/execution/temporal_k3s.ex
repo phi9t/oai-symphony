@@ -52,9 +52,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     end
   end
 
-  @spec cancel(map(), keyword()) :: :ok | {:error, term()}
-  def cancel(running_entry, opts \\ [])
+  @spec cancel(term()) :: :ok | {:error, term()}
+  def cancel(running_entry), do: cancel(running_entry, [])
 
+  @spec cancel(term(), keyword()) :: :ok | {:error, term()}
   def cancel(running_entry, opts) when is_map(running_entry) do
     workflow_id = Map.get(running_entry, :workflow_id)
 
@@ -182,8 +183,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       "codex" => %{
         "command" => Config.codex_command()
       },
-      "temporal" =>
-        Map.put(temporal_connection_payload(), "taskQueue", Config.temporal_task_queue()),
+      "temporal" => Map.put(temporal_connection_payload(), "taskQueue", Config.temporal_task_queue()),
       "k3s" => %{
         "namespace" => Config.k3s_namespace(),
         "image" => Config.k3s_image(),
@@ -252,9 +252,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
         elapsed_ms = status_failure_elapsed_ms(run_state)
         timeout_ms = Config.codex_stall_timeout_ms()
 
-        Logger.warning(
-          "Temporal/K3s status check failed for #{issue_context(issue)} elapsed_ms=#{elapsed_ms} timeout_ms=#{timeout_ms}: #{inspect(reason)}"
-        )
+        Logger.warning("Temporal/K3s status check failed for #{issue_context(issue)} elapsed_ms=#{elapsed_ms} timeout_ms=#{timeout_ms}: #{inspect(reason)}")
 
         if status_failure_timed_out?(elapsed_ms, timeout_ms) do
           raise RuntimeError,
@@ -284,8 +282,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       | status: normalized_workflow_status(status),
         job_name: string_value(Map.get(status, "jobName")) || run_state.job_name,
         artifact_dir: string_value(Map.get(status, "artifactDir")) || run_state.artifact_dir,
-        workspace_path:
-          string_value(Map.get(status, "workspacePath")) || run_state.workspace_path,
+        workspace_path: string_value(Map.get(status, "workspacePath")) || run_state.workspace_path,
         run_id: string_value(Map.get(status, "runId")) || run_state.run_id
     }
   end
@@ -339,31 +336,37 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp maybe_apply_run_result_state(%Issue{id: issue_id} = issue, %{} = result)
        when is_binary(issue_id) do
     if Config.tracker_kind() == "orgmode" do
-      target_state =
-        case string_value(Map.get(result, "targetState")) do
-          nil ->
-            default_target_state(result)
-
-          explicit ->
-            explicit
-        end
-
-      if allowed_target_state?(target_state) do
-        case Tracker.update_issue_state(issue_id, target_state) do
-          :ok ->
-            :ok
-
-          {:error, reason} ->
-            raise RuntimeError,
-                  "Temporal/K3s failed to sync Org state=#{target_state} for #{issue_context(issue)}: #{inspect(reason)}"
-        end
-      end
+      result
+      |> target_state_from_run_result()
+      |> maybe_sync_org_state!(issue, issue_id)
     end
 
     :ok
   end
 
   defp maybe_apply_run_result_state(_issue, _result), do: :ok
+
+  defp target_state_from_run_result(result) do
+    case string_value(Map.get(result, "targetState")) do
+      nil -> default_target_state(result)
+      explicit -> explicit
+    end
+  end
+
+  defp maybe_sync_org_state!(target_state, issue, issue_id) do
+    if is_binary(target_state) and allowed_target_state?(target_state) do
+      case Tracker.update_issue_state(issue_id, target_state) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          raise RuntimeError,
+                "Temporal/K3s failed to sync Org state=#{target_state} for #{issue_context(issue)}: #{inspect(reason)}"
+      end
+    else
+      :ok
+    end
+  end
 
   defp default_target_state(result) do
     cond do
