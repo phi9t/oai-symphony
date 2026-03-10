@@ -273,7 +273,7 @@ Fields:
   - Derive from `issue.identifier` by replacing any character not in `[A-Za-z0-9._-]` with `_`.
   - Use the sanitized value for the workspace directory name.
 - `Normalized Issue State`
-  - Compare states after `trim` + `lowercase`.
+  - Compare states after `lowercase`.
 - `Session ID`
   - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
 
@@ -361,9 +361,11 @@ Fields:
   - Default for `tracker.kind == "orgmode"`: `emacsclient -a emacs`
 - `state_map` (object)
   - Used when `tracker.kind == "orgmode"` to map Org TODO keywords to normalized tracker states.
-- `active_states` (list of strings or comma-separated string)
+- `active_states` (list of strings)
+  - Some implementations may also accept a comma-separated string for compatibility.
   - Default: `Todo`, `In Progress`
-- `terminal_states` (list of strings or comma-separated string)
+- `terminal_states` (list of strings)
+  - Some implementations may also accept a comma-separated string for compatibility.
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
 
 #### 5.3.2 `polling` (object)
@@ -420,7 +422,7 @@ Fields:
   - Changes should be re-applied at runtime and affect future retry scheduling.
 - `max_concurrent_agents_by_state` (map `state_name -> positive integer`)
   - Default: empty map.
-  - State keys are normalized (`trim` + `lowercase`) for lookup.
+  - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
 #### 5.3.6 `codex` (object)
@@ -568,8 +570,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.root_id`: string, required when `tracker.kind=orgmode`
 - `tracker.emacsclient_command`: string, default `emacsclient -a emacs` when `tracker.kind=orgmode`
 - `tracker.state_map`: object, used when `tracker.kind=orgmode`
-- `tracker.active_states`: list/string, default `Todo, In Progress`
-- `tracker.terminal_states`: list/string, default `Closed, Cancelled, Canceled, Duplicate, Done`
+- `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
+- `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
