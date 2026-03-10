@@ -553,9 +553,12 @@ defmodule SymphonyElixir.Config do
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
-    case resolve_codex_turn_sandbox_policy(workspace) do
-      {:ok, turn_sandbox_policy} -> turn_sandbox_policy
-      {:error, _reason} -> default_codex_turn_sandbox_policy(workspace)
+    case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
+      {:ok, policy} ->
+        policy
+
+      {:error, reason} ->
+        raise ArgumentError, message: "Invalid codex turn sandbox policy: #{inspect(reason)}"
     end
   end
 
@@ -632,15 +635,16 @@ defmodule SymphonyElixir.Config do
 
   @spec codex_runtime_settings(Path.t() | nil) :: {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil) do
-    with {:ok, approval_policy} <- resolve_codex_approval_policy(),
-         {:ok, thread_sandbox} <- resolve_codex_thread_sandbox(),
-         {:ok, turn_sandbox_policy} <- resolve_codex_turn_sandbox_policy(workspace) do
-      {:ok,
-       %{
-         approval_policy: approval_policy,
-         thread_sandbox: thread_sandbox,
-         turn_sandbox_policy: turn_sandbox_policy
-       }}
+    with {:ok, settings} <- settings() do
+      with {:ok, turn_sandbox_policy} <-
+             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace) do
+        {:ok,
+         %{
+           approval_policy: settings.codex.approval_policy,
+           thread_sandbox: settings.codex.thread_sandbox,
+           turn_sandbox_policy: turn_sandbox_policy
+         }}
+      end
     end
   end
 

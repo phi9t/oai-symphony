@@ -1100,6 +1100,110 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
   end
 
+  test "runtime sandbox policy resolution passes explicit policies through unchanged" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-sandbox-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-100")
+      File.mkdir_p!(issue_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          writableRoots: ["relative/path"],
+          networkAccess: true
+        }
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "writableRoots" => ["relative/path"],
+               "networkAccess" => true
+             }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_turn_sandbox_policy: %{
+          type: "futureSandbox",
+          nested: %{flag: true}
+        }
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "futureSandbox",
+               "nested" => %{"flag" => true}
+             }
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "path safety returns errors for invalid path segments" do
+    invalid_segment = String.duplicate("a", 300)
+    path = Path.join(System.tmp_dir!(), invalid_segment)
+    expanded_path = Path.expand(path)
+
+    assert {:error, {:path_canonicalize_failed, ^expanded_path, :enametoolong}} =
+             SymphonyElixir.PathSafety.canonicalize(path)
+  end
+
+  test "runtime sandbox policy resolution defaults when omitted and ignores workspace for explicit policies" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-sandbox-branches-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-101")
+
+      File.mkdir_p!(issue_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      settings = Config.settings!()
+
+      assert {:ok, canonical_workspace_root} =
+               SymphonyElixir.PathSafety.canonicalize(workspace_root)
+
+      assert {:ok, default_policy} = Schema.resolve_runtime_turn_sandbox_policy(settings)
+      assert default_policy["type"] == "workspaceWrite"
+      assert default_policy["writableRoots"] == [canonical_workspace_root]
+
+      read_only_settings = %{
+        settings
+        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}}
+      }
+
+      assert {:ok, %{"type" => "readOnly", "networkAccess" => true}} =
+               Schema.resolve_runtime_turn_sandbox_policy(read_only_settings, 123)
+
+      future_settings = %{
+        settings
+        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}}
+      }
+
+      assert {:ok, %{"type" => "futureSandbox", "nested" => %{"flag" => true}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(future_settings, 123)
+
+      assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, 123}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(settings, 123)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workflow prompt is used when building base prompt" do
     workflow_prompt = "Workflow prompt body used as codex instruction."
 

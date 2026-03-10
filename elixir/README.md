@@ -19,6 +19,10 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 4. Runs Codex inside a K3s job, with each retry creating a fresh workflow and project attempt
 5. Syncs `.symphony/workpad.md` and `.symphony/run-result.json` back into Org
 
+During app-server sessions, Symphony exposes tracker-specific tools. For `tracker.kind: linear`
+that includes the client-side `linear_graphql` tool so repo skills can make raw Linear GraphQL
+calls.
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
@@ -223,8 +227,9 @@ Notes:
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- Supported `codex.turn_sandbox_policy.type` values: `dangerFullAccess`, `readOnly`,
-  `externalSandbox`, `workspaceWrite`.
+- When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
+  unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
+  Symphony validation.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
@@ -258,7 +263,9 @@ codex:
 - `k3s.default_gpu_count` sets `nvidia.com/gpu` requests and limits only when the value is greater
   than zero.
 - `k3s.runtime_class` renders the Job `runtimeClassName` when set, and is omitted for CPU-only jobs.
-- If `WORKFLOW.md` is missing or has invalid YAML, startup and scheduling are halted until fixed.
+- If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
+- If a later reload fails, Symphony keeps running with the last known good workflow and logs the
+  reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
