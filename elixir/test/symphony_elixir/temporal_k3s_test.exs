@@ -29,6 +29,52 @@ defmodule SymphonyElixir.TemporalK3sTest do
     end
   end
 
+  defmodule FakeOrgStateFailureClient do
+    def fetch_candidate_issues, do: {:ok, []}
+    def fetch_issues_by_states(_states), do: {:ok, []}
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
+
+    def get_task(issue_id), do: {:ok, %{id: issue_id}}
+
+    def get_workpad(issue_id) do
+      send(self(), {:org_get_workpad_called, issue_id})
+      {:ok, "workpad for #{issue_id}"}
+    end
+
+    def replace_workpad(issue_id, content) do
+      send(self(), {:org_replace_workpad_called, issue_id, content})
+      {:ok, content}
+    end
+
+    def set_task_state(issue_id, state_name) do
+      send(self(), {:org_set_task_state_called, issue_id, state_name})
+      {:error, :org_write_failed}
+    end
+  end
+
+  defmodule FakeOrgWorkpadFailureClient do
+    def fetch_candidate_issues, do: {:ok, []}
+    def fetch_issues_by_states(_states), do: {:ok, []}
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
+
+    def get_task(issue_id), do: {:ok, %{id: issue_id}}
+
+    def get_workpad(issue_id) do
+      send(self(), {:org_get_workpad_called, issue_id})
+      {:ok, "workpad for #{issue_id}"}
+    end
+
+    def replace_workpad(issue_id, content) do
+      send(self(), {:org_replace_workpad_called, issue_id, content})
+      {:error, :org_workpad_write_failed}
+    end
+
+    def set_task_state(issue_id, state_name) do
+      send(self(), {:org_set_task_state_called, issue_id, state_name})
+      {:ok, %{id: issue_id, state: state_name}}
+    end
+  end
+
   setup do
     previous_org_client_module = Application.get_env(:symphony_elixir, :org_client_module)
 
@@ -64,6 +110,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
       temporal_address: "temporal.example:7233",
       temporal_namespace: "customer-a",
       temporal_status_poll_ms: 1,
+      codex_stall_timeout_ms: 50,
       k3s_project_root: k3s_project_root
     )
 
@@ -157,37 +204,42 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
             expected_run_id =
               case call_number do
-                3 -> "run-002"
+                4 -> "run-002"
                 _ -> "run-001"
               end
 
             assert payload["runId"] == expected_run_id
 
-            status =
+            response =
               case call_number do
                 1 ->
-                  %{
-                    "workflowId" => "issue/issue-remote",
-                    "runId" => "run-001",
-                    "status" => "queued",
-                    "projectId" => Map.get(state.run_payload, "projectId"),
-                    "workspacePath" => state.workspace_path,
-                    "artifactDir" => state.outputs_path,
-                    "jobName" => "symphony-job-issue-remote"
-                  }
+                  {:error, :temporary_unreachable}
 
                 2 ->
-                  %{
-                    "workflowId" => "issue/issue-remote",
-                    "runId" => "run-002",
-                    "status" => "running",
-                    "projectId" => Map.get(state.run_payload, "projectId"),
-                    "workspacePath" => state.workspace_path,
-                    "artifactDir" => state.outputs_path,
-                    "jobName" => "symphony-job-issue-remote"
-                  }
+                  {:ok,
+                   %{
+                     "workflowId" => "issue/issue-remote",
+                     "runId" => "run-001",
+                     "status" => "queued",
+                     "projectId" => Map.get(state.run_payload, "projectId"),
+                     "workspacePath" => state.workspace_path,
+                     "artifactDir" => state.outputs_path,
+                     "jobName" => "symphony-job-issue-remote"
+                   }}
 
                 3 ->
+                  {:ok,
+                   %{
+                     "workflowId" => "issue/issue-remote",
+                     "runId" => "run-002",
+                     "status" => "running",
+                     "projectId" => Map.get(state.run_payload, "projectId"),
+                     "workspacePath" => state.workspace_path,
+                     "artifactDir" => state.outputs_path,
+                     "jobName" => "symphony-job-issue-remote"
+                   }}
+
+                4 ->
                   File.write!(state.workpad_path, final_workpad)
 
                   File.write!(
@@ -202,15 +254,16 @@ defmodule SymphonyElixir.TemporalK3sTest do
                     })
                   )
 
-                  %{
-                    "workflowId" => "issue/issue-remote",
-                    "runId" => "run-002",
-                    "status" => "succeeded",
-                    "projectId" => Map.get(state.run_payload, "projectId"),
-                    "workspacePath" => state.workspace_path,
-                    "artifactDir" => state.outputs_path,
-                    "jobName" => "symphony-job-issue-remote"
-                  }
+                  {:ok,
+                   %{
+                     "workflowId" => "issue/issue-remote",
+                     "runId" => "run-002",
+                     "status" => "succeeded",
+                     "projectId" => Map.get(state.run_payload, "projectId"),
+                     "workspacePath" => state.workspace_path,
+                     "artifactDir" => state.outputs_path,
+                     "jobName" => "symphony-job-issue-remote"
+                   }}
               end
 
             updated_state = %{
@@ -219,7 +272,13 @@ defmodule SymphonyElixir.TemporalK3sTest do
                 status_payloads: [payload | state.status_payloads]
             }
 
-            {{:ok, Jason.encode!(status)}, updated_state}
+            reply =
+              case response do
+                {:ok, status} -> {:ok, Jason.encode!(status)}
+                {:error, reason} -> {:error, reason}
+              end
+
+            {reply, updated_state}
           end)
       end
     end
@@ -251,10 +310,441 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert_receive {:org_replace_workpad_called, "issue-remote", ^final_workpad}
     assert_receive {:org_set_task_state_called, "issue-remote", "Done"}
 
-    assert %{status_calls: 3, status_payloads: status_payloads} = Agent.get(runner_state, & &1)
-    assert length(status_payloads) == 3
+    assert %{status_calls: 4, status_payloads: status_payloads} = Agent.get(runner_state, & &1)
+    assert length(status_payloads) == 4
     assert Enum.all?(status_payloads, &temporal_connection_payload?/1)
     refute_receive {:codex_worker_update, "issue-remote", _}, 20
+  end
+
+  test "TemporalK3s raises once repeated status failures exceed the stall timeout budget" do
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+    on_exit(fn -> File.rm_rf(k3s_project_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_status_poll_ms: 1,
+      codex_stall_timeout_ms: 5,
+      k3s_project_root: k3s_project_root
+    )
+
+    issue = %Issue{
+      id: "issue-stall",
+      identifier: "REV-8",
+      title: "Bound remote poll failures",
+      description: "Fail when Temporal status remains unreachable",
+      state: "In Progress"
+    }
+
+    {:ok, runner_state} = Agent.start_link(fn -> %{status_calls: 0} end)
+
+    on_exit(fn ->
+      if Process.alive?(runner_state) do
+        Agent.stop(runner_state)
+      end
+    end)
+
+    runner = fn _command, subcommand, payload ->
+      case subcommand do
+        "run" ->
+          assert_temporal_connection_payload(payload)
+
+          {:ok,
+           Jason.encode!(%{
+             "workflowId" => "issue/issue-stall",
+             "runId" => "run-001",
+             "status" => "queued",
+             "projectId" => Map.get(payload, "projectId"),
+             "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+             "artifactDir" => get_in(payload, ["paths", "outputsPath"]),
+             "jobName" => "symphony-job-issue-stall"
+           })}
+
+        "status" ->
+          Agent.update(runner_state, fn state ->
+            %{state | status_calls: state.status_calls + 1}
+          end)
+
+          assert payload["workflowId"] == "issue/issue-stall"
+          assert payload["runId"] == "run-001"
+          assert_temporal_connection_payload(payload)
+          {:error, :temporal_unreachable}
+      end
+    end
+
+    assert_raise RuntimeError,
+                 ~r/Temporal\/K3s status checks stalled .* after \d+ms \(timeout=5ms\): :temporal_unreachable/,
+                 fn ->
+                   TemporalK3s.run(issue, self(), runner: runner)
+                 end
+
+    assert %{status_calls: status_calls} = Agent.get(runner_state, & &1)
+    assert status_calls > 1
+  end
+
+  test "TemporalK3s keeps retrying status errors when the stall timeout is disabled" do
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-no-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+    on_exit(fn -> File.rm_rf(k3s_project_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_status_poll_ms: 1,
+      codex_stall_timeout_ms: 0,
+      k3s_project_root: k3s_project_root
+    )
+
+    issue = %Issue{
+      id: "issue-no-timeout",
+      identifier: "REV-8",
+      title: "Allow explicit timeout disable",
+      description: "Do not time out remote status failures when disabled",
+      state: "In Progress"
+    }
+
+    {:ok, runner_state} = Agent.start_link(fn -> %{status_calls: 0} end)
+
+    on_exit(fn ->
+      if Process.alive?(runner_state) do
+        Agent.stop(runner_state)
+      end
+    end)
+
+    runner = fn _command, subcommand, payload ->
+      case subcommand do
+        "run" ->
+          {:ok,
+           Jason.encode!(%{
+             "workflowId" => "issue/issue-no-timeout",
+             "runId" => "run-001",
+             "status" => "queued",
+             "projectId" => Map.get(payload, "projectId"),
+             "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+             "artifactDir" => get_in(payload, ["paths", "outputsPath"]),
+             "jobName" => "symphony-job-issue-no-timeout"
+           })}
+
+        "status" ->
+          call_number =
+            Agent.get_and_update(runner_state, fn state ->
+              next_call = state.status_calls + 1
+              {next_call, %{state | status_calls: next_call}}
+            end)
+
+          assert payload["workflowId"] == "issue/issue-no-timeout"
+          assert payload["runId"] == "run-001"
+          assert_temporal_connection_payload(payload)
+
+          case call_number do
+            call_number when call_number < 3 ->
+              {:error, :temporal_unreachable}
+
+            3 ->
+              {:ok,
+               Jason.encode!(%{
+                 "workflowId" => "issue/issue-no-timeout",
+                 "runId" => "run-001",
+                 "status" => "succeeded",
+                 "projectId" => Map.get(payload, "projectId"),
+                 "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+                 "artifactDir" => get_in(payload, ["paths", "outputsPath"]),
+                 "jobName" => "symphony-job-issue-no-timeout"
+               })}
+          end
+      end
+    end
+
+    assert :ok = TemporalK3s.run(issue, self(), runner: runner)
+
+    assert %{status_calls: 3} = Agent.get(runner_state, & &1)
+  end
+
+  test "TemporalK3s raises when final Org workpad sync fails" do
+    Application.put_env(:symphony_elixir, :org_client_module, FakeOrgWorkpadFailureClient)
+
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-org-workpad-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+    on_exit(fn -> File.rm_rf(k3s_project_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_file: "/tmp/revision-plan.org",
+      tracker_root_id: "root-id",
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_status_poll_ms: 1,
+      k3s_project_root: k3s_project_root
+    )
+
+    issue = %Issue{
+      id: "issue-org-workpad",
+      identifier: "REV-8",
+      title: "Surface workpad sync failures",
+      description: "Do not swallow final Org workpad update errors",
+      state: "In Progress"
+    }
+
+    final_workpad = """
+    ### Environment
+    `remote:/workspace@abc123`
+
+    ### Plan
+    - [x] Fail loudly on workpad sync errors
+
+    ### Acceptance Criteria
+    - [x] Workpad sync failures stop the run
+
+    ### Validation
+    - [x] direct ExUnit regression
+
+    ### Notes
+    - Workpad update failed intentionally
+    """
+
+    {:ok, runner_state} =
+      Agent.start_link(fn ->
+        %{
+          workpad_path: nil,
+          result_path: nil,
+          workspace_path: nil,
+          outputs_path: nil
+        }
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(runner_state) do
+        Agent.stop(runner_state)
+      end
+    end)
+
+    runner = fn _command, subcommand, payload ->
+      case subcommand do
+        "run" ->
+          Agent.update(runner_state, fn state ->
+            %{
+              state
+              | workpad_path: get_in(payload, ["paths", "workpadPath"]),
+                result_path: get_in(payload, ["paths", "resultPath"]),
+                workspace_path: get_in(payload, ["paths", "workspacePath"]),
+                outputs_path: get_in(payload, ["paths", "outputsPath"])
+            }
+          end)
+
+          {:ok,
+           Jason.encode!(%{
+             "workflowId" => "issue/issue-org-workpad",
+             "runId" => "run-001",
+             "status" => "queued",
+             "projectId" => Map.get(payload, "projectId"),
+             "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+             "artifactDir" => get_in(payload, ["paths", "outputsPath"]),
+             "jobName" => "symphony-job-issue-org-workpad"
+           })}
+
+        "status" ->
+          %{
+            workpad_path: workpad_path,
+            result_path: result_path,
+            workspace_path: workspace_path,
+            outputs_path: outputs_path
+          } =
+            Agent.get(runner_state, & &1)
+
+          File.write!(workpad_path, final_workpad)
+
+          File.write!(
+            result_path,
+            Jason.encode!(%{
+              "status" => "succeeded",
+              "targetState" => "Done",
+              "summary" => "Completed, but workpad sync failed.",
+              "validation" => ["direct ExUnit regression"],
+              "blockedReason" => nil,
+              "needsContinuation" => false
+            })
+          )
+
+          {:ok,
+           Jason.encode!(%{
+             "workflowId" => "issue/issue-org-workpad",
+             "runId" => "run-001",
+             "status" => "succeeded",
+             "projectId" => Map.get(payload, "projectId"),
+             "workspacePath" => workspace_path,
+             "artifactDir" => outputs_path,
+             "jobName" => "symphony-job-issue-org-workpad"
+           })}
+      end
+    end
+
+    assert_raise RuntimeError,
+                 ~r/Temporal\/K3s failed to sync Org workpad .* :org_workpad_write_failed/,
+                 fn ->
+                   TemporalK3s.run(issue, self(), runner: runner)
+                 end
+
+    assert_receive {:org_get_workpad_called, "issue-org-workpad"}
+    assert_receive {:org_replace_workpad_called, "issue-org-workpad", ^final_workpad}
+    refute_receive {:org_set_task_state_called, "issue-org-workpad", _}
+  end
+
+  test "TemporalK3s raises when final Org state sync fails" do
+    Application.put_env(:symphony_elixir, :org_client_module, FakeOrgStateFailureClient)
+
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-org-sync-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+    on_exit(fn -> File.rm_rf(k3s_project_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_file: "/tmp/revision-plan.org",
+      tracker_root_id: "root-id",
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_status_poll_ms: 1,
+      k3s_project_root: k3s_project_root
+    )
+
+    issue = %Issue{
+      id: "issue-org-sync",
+      identifier: "REV-8",
+      title: "Surface state sync failures",
+      description: "Do not swallow final Org state update errors",
+      state: "In Progress"
+    }
+
+    final_workpad = """
+    ### Environment
+    `remote:/workspace@abc123`
+
+    ### Plan
+    - [x] Fail loudly on sync errors
+
+    ### Acceptance Criteria
+    - [x] State sync failures stop the run
+
+    ### Validation
+    - [x] direct ExUnit regression
+
+    ### Notes
+    - Tracker update failed intentionally
+    """
+
+    {:ok, runner_state} =
+      Agent.start_link(fn ->
+        %{
+          workpad_path: nil,
+          result_path: nil,
+          workspace_path: nil,
+          outputs_path: nil
+        }
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(runner_state) do
+        Agent.stop(runner_state)
+      end
+    end)
+
+    runner = fn _command, subcommand, payload ->
+      case subcommand do
+        "run" ->
+          Agent.update(runner_state, fn state ->
+            %{
+              state
+              | workpad_path: get_in(payload, ["paths", "workpadPath"]),
+                result_path: get_in(payload, ["paths", "resultPath"]),
+                workspace_path: get_in(payload, ["paths", "workspacePath"]),
+                outputs_path: get_in(payload, ["paths", "outputsPath"])
+            }
+          end)
+
+          {:ok,
+           Jason.encode!(%{
+             "workflowId" => "issue/issue-org-sync",
+             "runId" => "run-001",
+             "status" => "queued",
+             "projectId" => Map.get(payload, "projectId"),
+             "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+             "artifactDir" => get_in(payload, ["paths", "outputsPath"]),
+             "jobName" => "symphony-job-issue-org-sync"
+           })}
+
+        "status" ->
+          %{
+            workpad_path: workpad_path,
+            result_path: result_path,
+            workspace_path: workspace_path,
+            outputs_path: outputs_path
+          } =
+            Agent.get(runner_state, & &1)
+
+          File.write!(workpad_path, final_workpad)
+
+          File.write!(
+            result_path,
+            Jason.encode!(%{
+              "status" => "succeeded",
+              "targetState" => "Done",
+              "summary" => "Completed, but tracker sync failed.",
+              "validation" => ["direct ExUnit regression"],
+              "blockedReason" => nil,
+              "needsContinuation" => false
+            })
+          )
+
+          {:ok,
+           Jason.encode!(%{
+             "workflowId" => "issue/issue-org-sync",
+             "runId" => "run-001",
+             "status" => "succeeded",
+             "projectId" => Map.get(payload, "projectId"),
+             "workspacePath" => workspace_path,
+             "artifactDir" => outputs_path,
+             "jobName" => "symphony-job-issue-org-sync"
+           })}
+      end
+    end
+
+    assert_raise RuntimeError,
+                 ~r/Temporal\/K3s failed to sync Org state=Done .* :org_write_failed/,
+                 fn ->
+                   TemporalK3s.run(issue, self(), runner: runner)
+                 end
+
+    assert_receive {:org_get_workpad_called, "issue-org-sync"}
+    assert_receive {:org_replace_workpad_called, "issue-org-sync", ^final_workpad}
+    assert_receive {:org_set_task_state_called, "issue-org-sync", "Done"}
   end
 
   test "TemporalK3s cancel propagates configured Temporal connection settings" do
