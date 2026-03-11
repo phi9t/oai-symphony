@@ -33,6 +33,7 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :runtime_status,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -59,6 +60,7 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      runtime_status: nil,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -202,11 +204,26 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
 
-    with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
-    else
+    case Config.validate!() do
+      :ok ->
+        state = refresh_execution_runtime_status(state)
+
+        if runtime_ready?(state.runtime_status) do
+          with {:ok, issues} <- Tracker.fetch_candidate_issues(),
+               true <- available_slots(state) > 0 do
+            choose_issues(issues, state)
+          else
+            {:error, reason} ->
+              Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
+              state
+
+            false ->
+              state
+          end
+        else
+          state
+        end
+
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
         state
@@ -282,9 +299,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
-        state
-
-      false ->
         state
     end
   end
@@ -1074,6 +1088,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        codex_totals: state.codex_totals,
+       runtime: state.runtime_status,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
          checking?: state.poll_check_in_progress == true,
@@ -1278,6 +1293,45 @@ defmodule SymphonyElixir.Orchestrator do
         max_concurrent_agents: Config.max_concurrent_agents()
     }
   end
+
+  defp refresh_execution_runtime_status(%State{} = state) do
+    runtime_status = Execution.runtime_status()
+    log_runtime_status_transition(Map.get(state, :runtime_status), runtime_status)
+    %{state | runtime_status: runtime_status}
+  end
+
+  defp runtime_ready?(%{ready: true}), do: true
+  defp runtime_ready?(_runtime_status), do: false
+
+  defp log_runtime_status_transition(previous, %{execution_backend: "temporal_k3s", ready: true} = current) do
+    if runtime_status_signature(previous) != runtime_status_signature(current) do
+      Logger.info("Temporal/K3s runtime ready for dispatch")
+    end
+  end
+
+  defp log_runtime_status_transition(previous, %{execution_backend: "temporal_k3s", ready: false, blockers: blockers} = current) do
+    if runtime_status_signature(previous) != runtime_status_signature(current) do
+      Enum.each(blockers, fn blocker ->
+        Logger.error("Temporal/K3s runtime blocker #{runtime_blocker_code(blocker)}: #{runtime_blocker_message(blocker)}")
+      end)
+    end
+  end
+
+  defp log_runtime_status_transition(_previous, _current), do: :ok
+
+  defp runtime_status_signature(%{execution_backend: backend, ready: ready, blockers: blockers}) do
+    {backend, ready, Enum.map(blockers || [], &{runtime_blocker_code(&1), runtime_blocker_message(&1)})}
+  end
+
+  defp runtime_status_signature(_runtime_status), do: nil
+
+  defp runtime_blocker_code(%{"code" => code}) when is_binary(code), do: code
+  defp runtime_blocker_code(%{code: code}) when is_binary(code), do: code
+  defp runtime_blocker_code(_blocker), do: "unknown"
+
+  defp runtime_blocker_message(%{"message" => message}) when is_binary(message), do: message
+  defp runtime_blocker_message(%{message: message}) when is_binary(message), do: message
+  defp runtime_blocker_message(blocker), do: inspect(blocker)
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
