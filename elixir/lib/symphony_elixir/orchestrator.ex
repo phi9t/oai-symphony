@@ -946,7 +946,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp next_retry_attempt_from_running(running_entry) do
     case Map.get(running_entry, :retry_attempt) do
       attempt when is_integer(attempt) and attempt > 0 -> attempt + 1
-      _ -> nil
+      _ -> 1
     end
   end
 

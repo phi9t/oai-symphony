@@ -40,6 +40,11 @@ For this repository itself, the repo-local Org workflows live under [`.symphony/
 `commit`, `push`, and `land` before `Done`, with Codex runtime settings that allow unattended
 networked GitHub operations.
 
+Those Org workflows also define a planning lane: use `org_task.deep_dive` to keep structural
+analysis or failure investigation on the current task, and use `org_task.deep_revision` in
+`draft` mode for uncertain proposals or `create` mode only for clear top-level tasks with
+description, acceptance criteria, priority, validation steps, and a blank `Codex Workpad`.
+
 To smoke the self-landing queue in this repository, start Symphony with
 `./.symphony/fork-self-land-workflow.md`, move an Org task to `Todo`, and let the queue drive the
 task through implementation, fork PR creation, merge, and `Done`. After the merge is recorded in

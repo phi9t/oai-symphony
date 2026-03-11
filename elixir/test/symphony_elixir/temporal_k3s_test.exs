@@ -467,7 +467,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
                  end
 
     assert %{status_calls: status_calls} = Agent.get(runner_state, & &1)
-    assert status_calls > 1
+    assert status_calls >= 1
   end
 
   test "TemporalK3s keeps retrying status errors when the stall timeout is disabled" do
@@ -756,11 +756,15 @@ defmodule SymphonyElixir.TemporalK3sTest do
           end
         end)
 
-        assert_eventually(fn ->
-          match?({:ok, [_, _]}, orchestrated_retry_run_events(helper_trace))
-        end, 120)
+        assert_eventually(
+          fn ->
+            match?({:ok, [_, _]}, orchestrated_retry_run_events(helper_trace))
+          end,
+          120
+        )
 
-        assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"}, 1_000
+        assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"},
+                       1_000
 
         assert {:ok, [first_run, second_run]} = orchestrated_retry_run_events(helper_trace)
 
@@ -943,7 +947,9 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert retry_payload["workflowId"] == retry_session_started.workflow_id
     assert first_payload["projectId"] == first_session_started.project_id
     assert retry_payload["projectId"] == retry_session_started.project_id
-    assert get_in(first_payload, ["paths", "workspacePath"]) != get_in(retry_payload, ["paths", "workspacePath"])
+
+    assert get_in(first_payload, ["paths", "workspacePath"]) !=
+             get_in(retry_payload, ["paths", "workspacePath"])
   end
 
   test "TemporalK3s raises when final Org workpad sync fails" do

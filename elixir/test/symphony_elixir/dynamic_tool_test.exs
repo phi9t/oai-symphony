@@ -8,6 +8,35 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     def update_issue_state(_task_id, _state), do: :ok
     def get_workpad(task_id), do: {:ok, "workpad for #{task_id}"}
     def replace_workpad(_task_id, content), do: {:ok, content}
+
+    def deep_dive(task_id, content) do
+      send(self(), {:org_deep_dive_called, task_id, content})
+      {:ok, %{"taskId" => task_id, "section" => "Deep Dive", "content" => content}}
+    end
+
+    def deep_revision(task_id, mode, content, tasks) do
+      send(self(), {:org_deep_revision_called, task_id, mode, content, tasks})
+
+      {:ok,
+       %{
+         "taskId" => task_id,
+         "section" => if(mode == "create", do: "Deep Revision", else: "Planning Draft"),
+         "mode" => mode,
+         "content" => content,
+         "createdTasks" =>
+           Enum.map(tasks, fn task ->
+             %{
+               "id" => task["identifier"] || "generated-id",
+               "identifier" => task["identifier"] || "REV-99",
+               "title" => task["title"],
+               "description" => task["body"],
+               "priority" => task["priority"],
+               "state" => task["state"],
+               "labels" => task["labels"] || []
+             }
+           end)
+       }}
+    end
   end
 
   test "tool_specs advertises the linear_graphql input contract" do
@@ -127,7 +156,15 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
         %{"query" => query},
         linear_client: fn forwarded_query, variables, opts ->
           send(test_pid, {:linear_client_called, forwarded_query, variables, opts})
-          {:ok, %{"errors" => [%{"message" => "Must provide operation name if query contains multiple operations."}]}}
+
+          {:ok,
+           %{
+             "errors" => [
+               %{
+                 "message" => "Must provide operation name if query contains multiple operations."
+               }
+             ]
+           }}
         end
       )
 
@@ -325,7 +362,9 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       DynamicTool.execute(
         "linear_graphql",
         %{"query" => "query Viewer { viewer { id } }"},
-        linear_client: fn _query, _variables, _opts -> {:error, {:linear_api_request, :timeout}} end
+        linear_client: fn _query, _variables, _opts ->
+          {:error, {:linear_api_request, :timeout}}
+        end
       )
 
     assert [
@@ -400,8 +439,11 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  "properties" => %{
                    "action" => _,
                    "content" => _,
+                   "mode" => _,
                    "state" => _,
-                   "taskId" => _
+                   "summary" => _,
+                   "taskId" => _,
+                   "tasks" => _
                  },
                  "required" => ["action"],
                  "type" => "object"
@@ -478,6 +520,239 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(failure_text) == %{
              "error" => %{
                "message" => "`org_task.state` is required for `set_state`."
+             }
+           }
+  end
+
+  test "org_task deep_dive formats structured analysis and defaults to the current issue" do
+    response =
+      DynamicTool.execute(
+        "org_task",
+        %{
+          "action" => "deep_dive",
+          "summary" => "Dashboard and orchestrator responsibilities are tightly coupled.",
+          "details" => "Most operator-facing rendering logic lives in one very large module.",
+          "findings" => [
+            "StatusDashboard is one of the largest files in the repo.",
+            "Orchestrator state is reused directly by the dashboard."
+          ],
+          "risks" => ["Refactors will be difficult to land without better seams."],
+          "openQuestions" => ["Which snapshot data belongs in a separate presenter layer?"],
+          "recommendations" => ["Split view projection from orchestration state."],
+          "validation" => ["Review line counts and module boundaries before task creation."]
+        },
+        issue: %{id: "REV-12"},
+        org_adapter: FakeOrgAdapter
+      )
+
+    assert_received {:org_deep_dive_called, "REV-12", content}
+
+    assert content =~
+             "### Summary\nDashboard and orchestrator responsibilities are tightly coupled."
+
+    assert content =~
+             "### Details\nMost operator-facing rendering logic lives in one very large module."
+
+    assert content =~ "### Findings\n- StatusDashboard is one of the largest files in the repo."
+
+    assert content =~
+             "### Open Questions\n- Which snapshot data belongs in a separate presenter layer?"
+
+    assert response["success"] == true
+
+    assert [
+             %{
+               "text" => text
+             }
+           ] = response["contentItems"]
+
+    assert Jason.decode!(text) == %{
+             "taskId" => "REV-12",
+             "section" => "Deep Dive",
+             "content" => content
+           }
+  end
+
+  test "org_task deep_revision creates actionable follow-on tasks" do
+    response =
+      DynamicTool.execute(
+        "org_task",
+        %{
+          "action" => "deep_revision",
+          "taskId" => "REV-12",
+          "mode" => "create",
+          "summary" => "Split the largest control-plane modules into bounded surfaces.",
+          "rationale" => "The current module layout mixes state management, presentation, and config parsing.",
+          "uncertainty" => "The dashboard boundary should be validated before broad file moves.",
+          "validation" => ["Run the focused Elixir suite after each slice."],
+          "tasks" => [
+            %{
+              "title" => "Extract dashboard projection modules",
+              "description" => "Move snapshot shaping and UI-specific formatting out of StatusDashboard.",
+              "priority" => 1,
+              "labels" => ["dashboard", "architecture"],
+              "acceptanceCriteria" => [
+                "StatusDashboard delegates projection work to dedicated modules.",
+                "Projection modules are tested independently."
+              ],
+              "validation" => [
+                "mix test test/symphony_elixir/status_dashboard_snapshot_test.exs"
+              ],
+              "notes" => ["Keep Phoenix endpoint behavior unchanged."]
+            }
+          ]
+        },
+        org_adapter: FakeOrgAdapter
+      )
+
+    assert_received {:org_deep_revision_called, "REV-12", "create", content, tasks}
+
+    assert content =~
+             "### Revision Summary\nSplit the largest control-plane modules into bounded surfaces."
+
+    assert content =~ "### Mode\nCreate clear follow-on tasks directly."
+
+    assert content =~
+             "### Proposed Tasks\n- auto | Extract dashboard projection modules | state: Backlog | priority: 1"
+
+    assert [
+             %{
+               "body" => body,
+               "labels" => ["dashboard", "architecture"],
+               "priority" => 1,
+               "state" => "Backlog",
+               "title" => "Extract dashboard projection modules"
+             }
+           ] = tasks
+
+    assert body =~ "Move snapshot shaping and UI-specific formatting out of StatusDashboard."
+    assert body =~ "### Acceptance Criteria"
+    assert body =~ "### Validation / Verification"
+
+    assert response["success"] == true
+
+    assert [
+             %{
+               "text" => text
+             }
+           ] = response["contentItems"]
+
+    assert Jason.decode!(text) == %{
+             "taskId" => "REV-12",
+             "section" => "Deep Revision",
+             "mode" => "create",
+             "content" => content,
+             "createdTasks" => [
+               %{
+                 "id" => "generated-id",
+                 "identifier" => "REV-99",
+                 "title" => "Extract dashboard projection modules",
+                 "description" => body,
+                 "priority" => 1,
+                 "state" => "Backlog",
+                 "labels" => ["dashboard", "architecture"]
+               }
+             ]
+           }
+  end
+
+  test "org_task deep_revision validates planning inputs" do
+    missing_mode =
+      DynamicTool.execute(
+        "org_task",
+        %{
+          "action" => "deep_revision",
+          "taskId" => "REV-12",
+          "summary" => "Add planning tasks.",
+          "tasks" => [
+            %{
+              "title" => "Task title",
+              "description" => "Task description",
+              "priority" => 1,
+              "acceptanceCriteria" => ["Criterion"],
+              "validation" => ["Check"]
+            }
+          ]
+        },
+        org_adapter: FakeOrgAdapter
+      )
+
+    assert missing_mode["success"] == false
+
+    assert [
+             %{
+               "text" => missing_mode_text
+             }
+           ] = missing_mode["contentItems"]
+
+    assert Jason.decode!(missing_mode_text) == %{
+             "error" => %{
+               "message" => "`org_task.mode` is required for `deep_revision` and must be `create` or `draft`."
+             }
+           }
+
+    missing_field =
+      DynamicTool.execute(
+        "org_task",
+        %{
+          "action" => "deep_revision",
+          "taskId" => "REV-12",
+          "mode" => "draft",
+          "summary" => "Add planning tasks.",
+          "tasks" => [
+            %{
+              "title" => "Task title",
+              "priority" => 1,
+              "acceptanceCriteria" => ["Criterion"],
+              "validation" => ["Check"]
+            }
+          ]
+        },
+        org_adapter: FakeOrgAdapter
+      )
+
+    assert [
+             %{
+               "text" => missing_field_text
+             }
+           ] = missing_field["contentItems"]
+
+    assert Jason.decode!(missing_field_text) == %{
+             "error" => %{
+               "message" => "`org_task.tasks[0].description` is required so drafted or created tasks stay actionable."
+             }
+           }
+
+    invalid_priority =
+      DynamicTool.execute(
+        "org_task",
+        %{
+          "action" => "deep_revision",
+          "taskId" => "REV-12",
+          "mode" => "draft",
+          "summary" => "Add planning tasks.",
+          "tasks" => [
+            %{
+              "title" => "Task title",
+              "description" => "Task description",
+              "priority" => 7,
+              "acceptanceCriteria" => ["Criterion"],
+              "validation" => ["Check"]
+            }
+          ]
+        },
+        org_adapter: FakeOrgAdapter
+      )
+
+    assert [
+             %{
+               "text" => invalid_priority_text
+             }
+           ] = invalid_priority["contentItems"]
+
+    assert Jason.decode!(invalid_priority_text) == %{
+             "error" => %{
+               "message" => "`org_task.tasks[0].priority` must be 1, 2, or 3."
              }
            }
   end

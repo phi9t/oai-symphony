@@ -75,6 +75,24 @@ defmodule SymphonyElixir.ExtensionsTest do
       send(self(), {:org_set_task_state_called, issue_id, state_name})
       {:ok, %{id: issue_id, state: state_name}}
     end
+
+    def deep_dive(issue_id, content) do
+      send(self(), {:org_deep_dive_called, issue_id, content})
+      {:ok, %{"taskId" => issue_id, "section" => "Deep Dive", "content" => content}}
+    end
+
+    def deep_revision(issue_id, mode, content, tasks) do
+      send(self(), {:org_deep_revision_called, issue_id, mode, content, tasks})
+
+      {:ok,
+       %{
+         "taskId" => issue_id,
+         "section" => if(mode == "create", do: "Deep Revision", else: "Planning Draft"),
+         "mode" => mode,
+         "content" => content,
+         "createdTasks" => tasks
+       }}
+    end
   end
 
   defmodule SlowOrchestrator do
@@ -285,6 +303,23 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, "replacement"} = OrgAdapter.replace_workpad("issue-1", "replacement")
     assert_receive {:org_replace_workpad_called, "issue-1", "replacement"}
+
+    assert {:ok, %{"taskId" => "issue-1", "section" => "Deep Dive", "content" => "analysis"}} =
+             OrgAdapter.deep_dive("issue-1", "analysis")
+
+    assert_receive {:org_deep_dive_called, "issue-1", "analysis"}
+
+    assert {:ok,
+            %{
+              "taskId" => "issue-1",
+              "section" => "Deep Revision",
+              "mode" => "create",
+              "content" => "plan",
+              "createdTasks" => [%{"title" => "child"}]
+            }} =
+             OrgAdapter.deep_revision("issue-1", "create", "plan", [%{"title" => "child"}])
+
+    assert_receive {:org_deep_revision_called, "issue-1", "create", "plan", [%{"title" => "child"}]}
   end
 
   test "linear adapter delegates reads and validates mutation responses" do
