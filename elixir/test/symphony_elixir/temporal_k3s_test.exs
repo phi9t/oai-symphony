@@ -1433,3 +1433,11 @@ defmodule SymphonyElixir.TemporalK3sTest do
     }
   end
 end
+
+defmodule SymphonyElixir.TemporalK3sRecoveryScenarioHarnessTest do
+  use SymphonyElixir.TestSupport
+
+  import SymphonyElixir.TestSupport.RecoveryScenarioHarness
+
+  define_scenarios(SymphonyElixir.TestSupport.RecoveryScenarioHarness.TemporalAdapter)
+end
