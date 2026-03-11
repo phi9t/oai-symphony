@@ -10,6 +10,7 @@ import (
 
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
+	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	workflowservice "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -25,6 +26,10 @@ type fakeTemporalClient struct {
 	executeWorkflowID  string
 	executeTaskQueue   string
 	executeWorkflowArg any
+	systemInfoErr      error
+	namespaceErr       error
+	taskQueueResponses map[enumspb.TaskQueueType]*workflowservice.DescribeTaskQueueResponse
+	taskQueueErrors    map[enumspb.TaskQueueType]error
 }
 
 func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ interface{}, args ...interface{}) (client.WorkflowRun, error) {
@@ -46,6 +51,30 @@ func (f *fakeTemporalClient) CancelWorkflow(_ context.Context, workflowID string
 	f.cancelWorkflowID = workflowID
 	f.cancelRunID = runID
 	return nil
+}
+
+func (f *fakeTemporalClient) GetSystemInfo(_ context.Context) (*workflowservice.GetSystemInfoResponse, error) {
+	if f.systemInfoErr != nil {
+		return nil, f.systemInfoErr
+	}
+	return &workflowservice.GetSystemInfoResponse{}, nil
+}
+
+func (f *fakeTemporalClient) DescribeNamespace(_ context.Context, _ string) (*workflowservice.DescribeNamespaceResponse, error) {
+	if f.namespaceErr != nil {
+		return nil, f.namespaceErr
+	}
+	return &workflowservice.DescribeNamespaceResponse{}, nil
+}
+
+func (f *fakeTemporalClient) DescribeTaskQueue(_ context.Context, _ string, taskQueueType enumspb.TaskQueueType) (*workflowservice.DescribeTaskQueueResponse, error) {
+	if err := f.taskQueueErrors[taskQueueType]; err != nil {
+		return nil, err
+	}
+	if response := f.taskQueueResponses[taskQueueType]; response != nil {
+		return response, nil
+	}
+	return &workflowservice.DescribeTaskQueueResponse{}, nil
 }
 
 func (f *fakeTemporalClient) Close() {}
@@ -218,6 +247,115 @@ func TestDescribeSubcommandUsesTemporalConfigFromPayload(t *testing.T) {
 	}
 }
 
+func TestReadinessCommandReportsReadyRuntime(t *testing.T) {
+	fakeClient := &fakeTemporalClient{
+		taskQueueResponses: map[enumspb.TaskQueueType]*workflowservice.DescribeTaskQueueResponse{
+			enumspb.TASK_QUEUE_TYPE_WORKFLOW: {
+				Pollers: []*taskqueuepb.PollerInfo{{Identity: "workflow-worker"}},
+			},
+			enumspb.TASK_QUEUE_TYPE_ACTIVITY: {
+				Pollers: []*taskqueuepb.PollerInfo{{Identity: "activity-worker"}},
+			},
+		},
+	}
+
+	var capturedOptions client.Options
+	stdout := installTestHooks(t, fakeClient, &capturedOptions)
+
+	home := t.TempDir()
+	writeExecutable(t, filepath.Join(home, "k3s", "bin", "sjob"), "#!/bin/sh\nexit 0\n")
+
+	kubectlWrapper := filepath.Join(home, "kubectl-wrapper.sh")
+	writeExecutable(t, kubectlWrapper, "#!/bin/sh\necho symphony\n")
+
+	t.Setenv("SYMPHONY_HOME", home)
+	t.Setenv("SYMPHONY_KUBECTL_WRAPPER", kubectlWrapper)
+
+	inputPath := writeJSONInput(t, readinessInput{
+		Temporal: activities.TemporalConfig{
+			Address:   "temporal.example:7233",
+			Namespace: "customer-a",
+			TaskQueue: "symphony",
+		},
+		K3s: activities.K3sConfig{Namespace: "symphony"},
+	})
+
+	if err := readinessCommand([]string{"--input", inputPath, "--output", "json"}); err != nil {
+		t.Fatalf("readinessCommand returned error: %v", err)
+	}
+
+	assertDialOptions(t, capturedOptions)
+
+	var payload readinessPayload
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unable to decode readiness JSON: %v", err)
+	}
+
+	if !payload.Ready {
+		t.Fatalf("expected readiness payload to be ready, got %#v", payload)
+	}
+	if payload.Temporal.WorkflowPollers != 1 || payload.Temporal.ActivityPollers != 1 || !payload.Temporal.WorkerReady {
+		t.Fatalf("unexpected Temporal readiness payload: %#v", payload.Temporal)
+	}
+	if !payload.K3s.NamespaceReady || payload.K3s.LauncherPath == "" || payload.K3s.KubectlCommand == "" {
+		t.Fatalf("unexpected K3s readiness payload: %#v", payload.K3s)
+	}
+}
+
+func TestReadinessCommandReportsSpecificBlockers(t *testing.T) {
+	fakeClient := &fakeTemporalClient{
+		taskQueueResponses: map[enumspb.TaskQueueType]*workflowservice.DescribeTaskQueueResponse{
+			enumspb.TASK_QUEUE_TYPE_WORKFLOW: {},
+			enumspb.TASK_QUEUE_TYPE_ACTIVITY: {},
+		},
+	}
+
+	var capturedOptions client.Options
+	stdout := installTestHooks(t, fakeClient, &capturedOptions)
+
+	home := t.TempDir()
+	writeExecutable(t, filepath.Join(home, "k3s", "bin", "sjob"), "#!/bin/sh\nexit 0\n")
+
+	kubectlWrapper := filepath.Join(home, "kubectl-wrapper.sh")
+	writeExecutable(t, kubectlWrapper, "#!/bin/sh\nprintf '%s\\n' 'Error from server (NotFound): namespaces \"symphony\" not found' >&2\nexit 1\n")
+
+	t.Setenv("SYMPHONY_HOME", home)
+	t.Setenv("SYMPHONY_KUBECTL_WRAPPER", kubectlWrapper)
+
+	inputPath := writeJSONInput(t, readinessInput{
+		Temporal: activities.TemporalConfig{
+			Address:   "temporal.example:7233",
+			Namespace: "customer-a",
+			TaskQueue: "symphony",
+		},
+		K3s: activities.K3sConfig{Namespace: "symphony"},
+	})
+
+	if err := readinessCommand([]string{"--input", inputPath, "--output", "json"}); err != nil {
+		t.Fatalf("readinessCommand returned error: %v", err)
+	}
+
+	assertDialOptions(t, capturedOptions)
+
+	var payload readinessPayload
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unable to decode readiness JSON: %v", err)
+	}
+
+	if payload.Ready {
+		t.Fatalf("expected readiness payload to be blocked, got %#v", payload)
+	}
+
+	codes := map[string]bool{}
+	for _, blocker := range payload.Blockers {
+		codes[blocker.Code] = true
+	}
+
+	if !codes["temporal_worker_missing"] || !codes["k3s_namespace_missing"] {
+		t.Fatalf("expected worker and namespace blockers, got %#v", payload.Blockers)
+	}
+}
+
 func installTestHooks(t *testing.T, fakeClient *fakeTemporalClient, capturedOptions *client.Options) *bytes.Buffer {
 	t.Helper()
 
@@ -264,5 +402,16 @@ func assertDialOptions(t *testing.T, options client.Options) {
 
 	if options.Namespace != "customer-a" {
 		t.Fatalf("expected Namespace customer-a, got %q", options.Namespace)
+	}
+}
+
+func writeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("unable to create parent dir for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("unable to write executable %s: %v", path, err)
 	}
 }

@@ -2,6 +2,7 @@ package activities
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +78,40 @@ func TestSjobRunArgsDefaultsOptionalResources(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected args:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestBuildJobCommandUsesContainerWorkspacePaths(t *testing.T) {
+	input := RunInput{
+		Repository: RepositoryConfig{
+			OriginURL:     "/opt/symphony",
+			DefaultBranch: "main",
+		},
+		Codex: CodexConfig{
+			Command: "python3 /opt/symphony/dev/smoke_codex.py",
+		},
+		Paths: PathConfig{
+			WorkspacePath: "/host/projects/rev-16/workspace",
+			PromptPath:    "/host/projects/rev-16/workspace/.symphony/prompt.md",
+			WorkpadPath:   "/host/projects/rev-16/workspace/.symphony/workpad.md",
+			ResultPath:    "/host/projects/rev-16/workspace/.symphony/run-result.json",
+			IssuePath:     "/host/projects/rev-16/workspace/.symphony/issue.json",
+		},
+	}
+
+	command := buildJobCommand(input)
+
+	expected := []string{
+		"PROMPT_PATH='/workspace/.symphony/prompt.md'",
+		"WORKPAD_PATH='/workspace/.symphony/workpad.md'",
+		"RESULT_PATH='/workspace/.symphony/run-result.json'",
+		"ISSUE_PATH='/workspace/.symphony/issue.json'",
+		"WORKSPACE_PATH='/workspace'",
+	}
+
+	for _, fragment := range expected {
+		if !strings.Contains(command, fragment) {
+			t.Fatalf("expected %q in command %q", fragment, command)
+		}
 	}
 }

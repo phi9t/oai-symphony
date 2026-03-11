@@ -75,6 +75,24 @@ defmodule SymphonyElixir.ExtensionsTest do
       send(self(), {:org_set_task_state_called, issue_id, state_name})
       {:ok, %{id: issue_id, state: state_name}}
     end
+
+    def deep_dive(issue_id, content) do
+      send(self(), {:org_deep_dive_called, issue_id, content})
+      {:ok, %{"taskId" => issue_id, "section" => "Deep Dive", "content" => content}}
+    end
+
+    def deep_revision(issue_id, mode, content, tasks) do
+      send(self(), {:org_deep_revision_called, issue_id, mode, content, tasks})
+
+      {:ok,
+       %{
+         "taskId" => issue_id,
+         "section" => if(mode == "create", do: "Deep Revision", else: "Planning Draft"),
+         "mode" => mode,
+         "content" => content,
+         "createdTasks" => tasks
+       }}
+    end
   end
 
   defmodule SlowOrchestrator do
@@ -285,6 +303,23 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, "replacement"} = OrgAdapter.replace_workpad("issue-1", "replacement")
     assert_receive {:org_replace_workpad_called, "issue-1", "replacement"}
+
+    assert {:ok, %{"taskId" => "issue-1", "section" => "Deep Dive", "content" => "analysis"}} =
+             OrgAdapter.deep_dive("issue-1", "analysis")
+
+    assert_receive {:org_deep_dive_called, "issue-1", "analysis"}
+
+    assert {:ok,
+            %{
+              "taskId" => "issue-1",
+              "section" => "Deep Revision",
+              "mode" => "create",
+              "content" => "plan",
+              "createdTasks" => [%{"title" => "child"}]
+            }} =
+             OrgAdapter.deep_revision("issue-1", "create", "plan", [%{"title" => "child"}])
+
+    assert_receive {:org_deep_revision_called, "issue-1", "create", "plan", [%{"title" => "child"}]}
   end
 
   test "linear adapter delegates reads and validates mutation responses" do
@@ -534,6 +569,52 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "phoenix observability api surfaces runtime readiness blockers" do
+    snapshot =
+      static_snapshot()
+      |> Map.put(:runtime, %{
+        execution_backend: "temporal_k3s",
+        ready: false,
+        blockers: [
+          %{
+            "code" => "temporal_worker_missing",
+            "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"default\""
+          }
+        ],
+        checked_at: DateTime.utc_now()
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RuntimeObservabilityApiOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll", "reconcile"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert state_payload["runtime"] == %{
+             "execution_backend" => "temporal_k3s",
+             "ready" => false,
+             "blockers" => [
+               %{
+                 "code" => "temporal_worker_missing",
+                 "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"default\""
+               }
+             ],
+             "checked_at" => state_payload["runtime"]["checked_at"]
+           }
   end
 
   test "phoenix observability api preserves snapshot timeout behavior" do

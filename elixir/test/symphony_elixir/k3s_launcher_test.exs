@@ -78,6 +78,49 @@ defmodule SymphonyElixir.K3sLauncherTest do
     assert manifest =~ ~s(limits:\n              cpu: "2"\n              memory: "8Gi")
   end
 
+  test "sjob shortens long job names to valid Kubernetes resource and label values" do
+    %{capture_path: capture_path, project_root: project_root, shared_cache_root: shared_cache_root, wrapper_path: wrapper_path} =
+      temp_launcher_paths()
+
+    long_project_id = "smoke-20260311191652"
+    long_job_name = "smoke-smoke-20260311191652-019cde54"
+
+    {output, 0} =
+      System.cmd(
+        @sjob_path,
+        [
+          "run",
+          "--project-id",
+          long_project_id,
+          "--job",
+          long_job_name,
+          "--project-root",
+          project_root,
+          "--shared-cache-root",
+          shared_cache_root,
+          "--",
+          "echo hi"
+        ],
+        cd: @repo_root,
+        env: [{"SYMPHONY_KUBECTL_WRAPPER", wrapper_path}, {"SYMPHONY_CAPTURED_MANIFEST", capture_path}],
+        stderr_to_stdout: true
+      )
+
+    [resource_name] = Regex.run(~r/submitted (\S+)/, output, capture: :all_but_first)
+    assert String.starts_with?(resource_name, "symphony-job-")
+    assert String.length(resource_name) <= 63
+
+    manifest = File.read!(capture_path)
+
+    [manifest_name] = Regex.run(~r/^  name: (\S+)$/m, manifest, capture: :all_but_first)
+    [project_label] = Regex.run(~r/symphony\/project-id: "([^"]+)"/, manifest, capture: :all_but_first)
+    [job_label] = Regex.run(~r/symphony\/job-name: "([^"]+)"/, manifest, capture: :all_but_first)
+
+    assert manifest_name == resource_name
+    assert String.length(project_label) <= 63
+    assert String.length(job_label) <= 63
+  end
+
   defp temp_launcher_paths do
     root = Path.join(System.tmp_dir!(), "symphony-k3s-launcher-#{System.unique_integer([:positive])}")
     capture_path = Path.join(root, "manifest.yaml")

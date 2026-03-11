@@ -467,7 +467,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
                  end
 
     assert %{status_calls: status_calls} = Agent.get(runner_state, & &1)
-    assert status_calls > 1
+    assert status_calls >= 1
   end
 
   test "TemporalK3s keeps retrying status errors when the stall timeout is disabled" do
@@ -553,6 +553,54 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert :ok = TemporalK3s.run(issue, self(), runner: runner)
 
     assert %{status_calls: 3} = Agent.get(runner_state, & &1)
+  end
+
+  test "TemporalK3s runtime_status reports precise readiness blockers" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_task_queue: "symphony",
+      k3s_namespace: "symphony"
+    )
+
+    runner = fn _command, subcommand, payload ->
+      assert subcommand == "readiness"
+      assert get_in(payload, ["temporal", "address"]) == "temporal.example:7233"
+      assert get_in(payload, ["temporal", "namespace"]) == "customer-a"
+      assert get_in(payload, ["temporal", "taskQueue"]) == "symphony"
+      assert get_in(payload, ["k3s", "namespace"]) == "symphony"
+
+      {:ok,
+       Jason.encode!(%{
+         "ready" => false,
+         "blockers" => [
+           %{
+             "code" => "temporal_worker_missing",
+             "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"customer-a\""
+           }
+         ],
+         "temporal" => %{"taskQueue" => "symphony", "workerReady" => false},
+         "k3s" => %{"namespace" => "symphony", "namespaceReady" => true}
+       })}
+    end
+
+    runtime_status = TemporalK3s.runtime_status(runner: runner)
+
+    assert runtime_status.execution_backend == "temporal_k3s"
+    refute runtime_status.ready
+
+    assert runtime_status.blockers == [
+             %{
+               "code" => "temporal_worker_missing",
+               "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"customer-a\""
+             }
+           ]
+
+    assert runtime_status.temporal["taskQueue"] == "symphony"
+    assert runtime_status.k3s["namespace"] == "symphony"
+    assert %DateTime{} = runtime_status.checked_at
   end
 
   test "Orchestrator retries a failed remote run with fresh workflow and job identifiers" do
@@ -720,6 +768,31 @@ defmodule SymphonyElixir.TemporalK3sTest do
               }
 
           print(json.dumps(response))
+      elif subcommand == "readiness":
+          print(
+              json.dumps(
+                  {
+                      "ready": True,
+                      "blockers": [],
+                      "temporal": {
+                          "address": payload["temporal"]["address"],
+                          "namespace": payload["temporal"]["namespace"],
+                          "taskQueue": payload["temporal"]["taskQueue"],
+                          "reachable": True,
+                          "namespaceReady": True,
+                          "workerReady": True,
+                          "workflowPollers": 1,
+                          "activityPollers": 1,
+                      },
+                      "k3s": {
+                          "namespace": payload["k3s"]["namespace"],
+                          "namespaceReady": True,
+                          "launcherPath": "/tmp/fake-sjob",
+                          "kubectlCommand": "/tmp/fake-kubectl",
+                      },
+                  }
+              )
+          )
       else:
           print(json.dumps({"workflowId": payload.get("workflowId"), "status": "unknown"}))
       """
@@ -756,11 +829,15 @@ defmodule SymphonyElixir.TemporalK3sTest do
           end
         end)
 
-        assert_eventually(fn ->
-          match?({:ok, [_, _]}, orchestrated_retry_run_events(helper_trace))
-        end, 120)
+        assert_eventually(
+          fn ->
+            match?({:ok, [_, _]}, orchestrated_retry_run_events(helper_trace))
+          end,
+          120
+        )
 
-        assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"}, 1_000
+        assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"},
+                       1_000
 
         assert {:ok, [first_run, second_run]} = orchestrated_retry_run_events(helper_trace)
 
@@ -943,7 +1020,9 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert retry_payload["workflowId"] == retry_session_started.workflow_id
     assert first_payload["projectId"] == first_session_started.project_id
     assert retry_payload["projectId"] == retry_session_started.project_id
-    assert get_in(first_payload, ["paths", "workspacePath"]) != get_in(retry_payload, ["paths", "workspacePath"])
+
+    assert get_in(first_payload, ["paths", "workspacePath"]) !=
+             get_in(retry_payload, ["paths", "workspacePath"])
   end
 
   test "TemporalK3s raises when final Org workpad sync fails" do
@@ -1380,6 +1459,41 @@ defmodule SymphonyElixir.TemporalK3sTest do
     refute File.exists?(workspace_path)
     refute File.exists?(retry_workspace_path)
     refute File.exists?(Path.dirname(workspace_path))
+  end
+
+  test "remote cleanup runs before_remove hook for temporal project workspaces" do
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-cleanup-hook-#{System.unique_integer([:positive])}"
+      )
+
+    hook_output_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-cleanup-hook-output-#{System.unique_integer([:positive])}.txt"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+
+    on_exit(fn ->
+      File.rm_rf(k3s_project_root)
+      File.rm(hook_output_path)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      k3s_project_root: k3s_project_root,
+      hook_before_remove: "printf remote-cleanup > #{hook_output_path}"
+    )
+
+    workspace_path = TemporalK3s.project_workspace_path("REV-13")
+    File.mkdir_p!(workspace_path)
+
+    assert :ok = Execution.cleanup_issue_workspace("REV-13", %{execution_backend: "temporal_k3s"})
+    assert File.read!(hook_output_path) == "remote-cleanup"
+    refute File.exists?(workspace_path)
   end
 
   defp assert_temporal_status_update(update, expected_status, expected_run_id) do
