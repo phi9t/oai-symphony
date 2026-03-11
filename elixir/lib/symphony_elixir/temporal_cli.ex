@@ -37,6 +37,11 @@ defmodule SymphonyElixir.TemporalCli do
     invoke("describe", %{"workflowId" => workflow_id}, opts)
   end
 
+  @spec readiness(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def readiness(payload, opts \\ []) when is_map(payload) do
+    invoke("readiness", payload, opts)
+  end
+
   defp invoke(subcommand, payload, opts) when is_binary(subcommand) and is_map(payload) do
     runner = Keyword.get(opts, :runner, &default_runner/3)
     command = Keyword.get(opts, :command, Config.temporal_helper_command())

@@ -4,4 +4,4 @@ set -eu -o pipefail
 
 : "${SYMPHONY_K3S_CONTAINER_NAME:?SYMPHONY_K3S_CONTAINER_NAME is required}"
 
-exec docker exec "${SYMPHONY_K3S_CONTAINER_NAME}" k3s kubectl "$@"
+exec docker exec -i "${SYMPHONY_K3S_CONTAINER_NAME}" kubectl "$@"

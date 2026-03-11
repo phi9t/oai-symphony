@@ -78,19 +78,23 @@ When you are done with the remote backend, tear it down with:
 
 ## Repo-local Org workflows
 
-This repository also keeps two local Org workflows under `./.symphony/`:
+This repository keeps three repo-owned Org workflows under `./.symphony/`:
 
-- `local-bootstrap-workflow.md` runs the local backend against the repo's Org queue and is intended
+- `temporal-self-land-workflow.md` is the preferred unattended path on hosts where Temporal/K3s is
+  available. It runs the Org queue through the remote backend, keeps progress in local
+  `.symphony/*` artifacts, and only targets `Done` after a PR is merged and the workpad records
+  both the PR URL and merge commit.
+- `fork-self-land-workflow.md` remains the local fallback. It rewrites each workspace so `origin`
+  points at `git@github.com:phi9t/oai-symphony.git` and requires the repo-local `commit`, `push`,
+  and `land` skills before the task can move to `Done`.
+- `local-bootstrap-workflow.md` runs the local backend against the same Org queue and is intended
   for supervised bootstrap tasks that stop in `Human Review`.
-- `fork-self-land-workflow.md` runs the local backend against the same Org queue, rewrites each
-  workspace so `origin` points at `git@github.com:phi9t/oai-symphony.git`, and requires the
-  repo-local `commit`, `push`, and `land` skills before the task can move to `Done`.
-- The fork workflow also overrides the default Codex runtime settings so agent turns stay
-  workspace-scoped while still allowing networked GitHub operations needed for `push` and `land`.
 
-Start either workflow from the repository root:
+Start any workflow from the repository root:
 
 ```bash
+eval "$(./dev/temporal-k3s env)"
+mise exec -- ./elixir/bin/symphony ./.symphony/temporal-self-land-workflow.md
 mise exec -- ./elixir/bin/symphony ./.symphony/local-bootstrap-workflow.md
 mise exec -- ./elixir/bin/symphony ./.symphony/fork-self-land-workflow.md
 ```
@@ -166,32 +170,40 @@ IO.inspect(SymphonyElixir.Org.Client.deep_revision("REV-PLANNING", "create", "##
 
 ## Self-Landing Queue Smoke
 
-Use the fork workflow when you want Symphony to implement the task, push to
-`phi9t/oai-symphony`, land the PR, mark the Org task `Done`, and then clean up the workspace.
+Use the Temporal workflow when you want Symphony to implement the task through Temporal/K3s, push
+to `phi9t/oai-symphony`, land the PR, mark the Org task `Done`, and then clean up the remote
+workspace. Keep the local fork workflow as the fallback when the remote runtime is unavailable.
 
 Run the queue from the repository root:
 
 ```bash
-mise exec -- ./elixir/bin/symphony ./.symphony/fork-self-land-workflow.md
+./dev/temporal-k3s up
+eval "$(./dev/temporal-k3s env)"
+export SYMPHONY_K3S_IMAGE=your-real-agent-image
+mise exec -- ./elixir/bin/symphony ./.symphony/temporal-self-land-workflow.md
 ```
 
 Smoke path:
 
 1. Create a repo task under `.symphony/revision-plan.org` or move an existing task to `Todo`.
-2. Wait for Symphony to claim the task, open a fork PR, and land it through the repo-local
+2. Confirm the dashboard or `/api/v1/state` shows the Temporal/K3s runtime as ready before the
+   task is claimed. If it is blocked, fix the reported worker, namespace, Temporal, or K3s
+   prerequisite first.
+3. Wait for Symphony to claim the task, open a fork PR, and land it through the repo-local
    `commit`, `push`, and `land` skills.
-3. Confirm the Org `Codex Workpad` now includes the PR URL plus merge commit and that the task
+4. Confirm the Org `Codex Workpad` now includes the PR URL plus merge commit and that the task
    state is `Done`.
-4. Confirm the workspace is gone, for example with
-   `find ./.symphony/workspaces -maxdepth 1 -type d -name '<task-identifier>'`.
+5. Confirm the workspace is gone, for example with
+   `find "${SYMPHONY_K3S_PROJECT_ROOT}" -maxdepth 1 -type d -name '<task-identifier>*'`.
 
 Cleanup behavior:
 
 - A successful self-landing run writes `targetState: "Done"` into `.symphony/run-result.json`. Once
-  Symphony observes that terminal state, it removes the matching workspace during terminal-state
-  reconciliation or on the next startup cleanup sweep.
+  Symphony observes that terminal state, it removes the matching remote project root during
+  terminal-state reconciliation or on the next startup cleanup sweep.
 - If the task reaches a terminal state without merge, the configured `hooks.before_remove` command
-  still runs before deletion. In this repository's fork workflow that hook executes
+  still runs before deletion for both local and remote workspaces. In this repository's workflows
+  that hook executes
   `mix workspace.before_remove --repo phi9t/oai-symphony` so any open fork PRs for the branch are
   closed before the workspace disappears.
 
@@ -218,6 +230,15 @@ What each command does:
   artifacts.
 - `down` stops the worker and removes the local Temporal plus K3s containers.
 
+Symphony itself also probes runtime readiness before each claim when `execution.kind:
+temporal_k3s`. The dashboard, `/api/v1/state`, and logs now report whether the runtime is blocked
+by:
+
+- unreachable Temporal
+- a missing Temporal namespace
+- a missing Temporal worker for the configured task queue
+- missing or broken K3s prerequisites such as the namespace or `kubectl` wrapper
+
 Before starting Symphony itself, export the workflow-facing environment that matches the dev stack:
 
 ```bash
@@ -233,8 +254,13 @@ Notes:
   `./dev/temporal-k3s up`.
 - Real agent runs still need `k3s.image` to point at an image that contains `bash`, `git`, and a
   working implementation of your configured `codex.command`.
+- The repo-owned `./.symphony/temporal-self-land-workflow.md` reads `SYMPHONY_K3S_IMAGE`, so set
+  that env var before starting the unattended queue.
 - The default Temporal helper command is now `./temporal/bin/symphony`, which works correctly from
   the repository root.
+- If the worker dies or K3s jobs fail, restart the stack with `./dev/temporal-k3s up`, check
+  `./dev/temporal-k3s status`, and then use the dashboard or `/api/v1/state` to confirm readiness
+  has cleared before letting Symphony claim more work.
 
 ## Configuration
 

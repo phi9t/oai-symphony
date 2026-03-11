@@ -1,6 +1,8 @@
 ---
 # Repo-local Symphony workflows for this repository live under `../.symphony/`.
 # `local-bootstrap-workflow.md` is the supervised local path.
+# `temporal-self-land-workflow.md` is the preferred unattended path on hosts
+# where Temporal/K3s is available.
 # `fork-self-land-workflow.md` rewrites workspace remotes to
 # `git@github.com:phi9t/oai-symphony.git`, enables networked Codex turns
 # for GitHub operations, and requires `commit`, `push`, and `land`
@@ -70,7 +72,11 @@ codex:
 ---
 
 The configured `temporal.address` and `temporal.namespace` apply to helper `run`, `status`,
-`cancel`, and `describe` requests.
+`cancel`, `describe`, and readiness requests. Before each claim, Symphony now probes Temporal
+reachability, namespace availability, worker pollers, and the target K3s namespace so blocked
+runtimes surface before dispatch instead of failing silently afterward. The configured
+`hooks.before_remove` command also runs before remote Temporal/K3s project roots are deleted, so
+cleanup stays aligned with the local backend.
 
 You are working on an Org task `{{ issue.identifier }}`.
 

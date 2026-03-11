@@ -33,6 +33,7 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :runtime_status,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -59,6 +60,7 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      runtime_status: nil,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -202,92 +204,98 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
 
-    with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+    case Config.validate!() do
+      {:error, reason} ->
+        log_dispatch_config_error(reason)
+        state
+
+      :ok ->
+        state
+        |> refresh_execution_runtime_status()
+        |> maybe_dispatch_ready_runtime()
+    end
+  end
+
+  defp maybe_dispatch_ready_runtime(%State{} = state) do
+    if runtime_ready?(state.runtime_status) do
+      maybe_dispatch_available_slots(state)
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        state
+      state
+    end
+  end
 
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
-        state
+  defp maybe_dispatch_available_slots(%State{} = state) do
+    if available_slots(state) > 0 do
+      maybe_choose_issues_from_tracker(state)
+    else
+      state
+    end
+  end
 
-      {:error, :missing_org_tracker_file} ->
-        Logger.error("Org tracker file missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_org_tracker_root_id} ->
-        Logger.error("Org tracker root_id missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_org_emacsclient} ->
-        Logger.error("Org tracker emacsclient command is unavailable")
-        state
-
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
-
-        state
-
-      {:error, {:unsupported_execution_kind, kind}} ->
-        Logger.error("Unsupported execution kind in WORKFLOW.md: #{inspect(kind)}")
-
-        state
-
-      {:error, :missing_temporal_helper_command} ->
-        Logger.error("Temporal helper command missing in WORKFLOW.md")
-
-        state
-
-      {:error, :missing_repository_origin_url} ->
-        Logger.error("Repository origin URL missing in WORKFLOW.md for temporal_k3s execution")
-
-        state
-
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-
-        state
-
-      {:error, :missing_codex_command} ->
-        Logger.error("Codex command missing in WORKFLOW.md")
-        state
-
-      {:error, {:invalid_codex_approval_policy, value}} ->
-        Logger.error("Invalid codex.approval_policy in WORKFLOW.md: #{inspect(value)}")
-        state
-
-      {:error, {:invalid_codex_thread_sandbox, value}} ->
-        Logger.error("Invalid codex.thread_sandbox in WORKFLOW.md: #{inspect(value)}")
-        state
-
-      {:error, {:invalid_codex_turn_sandbox_policy, reason}} ->
-        Logger.error("Invalid codex.turn_sandbox_policy in WORKFLOW.md: #{inspect(reason)}")
-        state
-
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
-
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
-
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
+  defp maybe_choose_issues_from_tracker(%State{} = state) do
+    case Tracker.fetch_candidate_issues() do
+      {:ok, issues} ->
+        choose_issues(issues, state)
 
       {:error, reason} ->
         Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
         state
-
-      false ->
-        state
     end
   end
+
+  defp log_dispatch_config_error(:missing_linear_api_token),
+    do: Logger.error("Linear API token missing in WORKFLOW.md")
+
+  defp log_dispatch_config_error(:missing_linear_project_slug),
+    do: Logger.error("Linear project slug missing in WORKFLOW.md")
+
+  defp log_dispatch_config_error(:missing_org_tracker_file),
+    do: Logger.error("Org tracker file missing in WORKFLOW.md")
+
+  defp log_dispatch_config_error(:missing_org_tracker_root_id),
+    do: Logger.error("Org tracker root_id missing in WORKFLOW.md")
+
+  defp log_dispatch_config_error(:missing_org_emacsclient),
+    do: Logger.error("Org tracker emacsclient command is unavailable")
+
+  defp log_dispatch_config_error(:missing_tracker_kind),
+    do: Logger.error("Tracker kind missing in WORKFLOW.md")
+
+  defp log_dispatch_config_error({:unsupported_execution_kind, kind}),
+    do: Logger.error("Unsupported execution kind in WORKFLOW.md: #{inspect(kind)}")
+
+  defp log_dispatch_config_error(:missing_temporal_helper_command),
+    do: Logger.error("Temporal helper command missing in WORKFLOW.md")
+
+  defp log_dispatch_config_error(:missing_repository_origin_url),
+    do: Logger.error("Repository origin URL missing in WORKFLOW.md for temporal_k3s execution")
+
+  defp log_dispatch_config_error({:unsupported_tracker_kind, kind}),
+    do: Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
+
+  defp log_dispatch_config_error(:missing_codex_command),
+    do: Logger.error("Codex command missing in WORKFLOW.md")
+
+  defp log_dispatch_config_error({:invalid_codex_approval_policy, value}),
+    do: Logger.error("Invalid codex.approval_policy in WORKFLOW.md: #{inspect(value)}")
+
+  defp log_dispatch_config_error({:invalid_codex_thread_sandbox, value}),
+    do: Logger.error("Invalid codex.thread_sandbox in WORKFLOW.md: #{inspect(value)}")
+
+  defp log_dispatch_config_error({:invalid_codex_turn_sandbox_policy, reason}),
+    do: Logger.error("Invalid codex.turn_sandbox_policy in WORKFLOW.md: #{inspect(reason)}")
+
+  defp log_dispatch_config_error({:missing_workflow_file, path, reason}),
+    do: Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
+
+  defp log_dispatch_config_error(:workflow_front_matter_not_a_map),
+    do: Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
+
+  defp log_dispatch_config_error({:workflow_parse_error, reason}),
+    do: Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
+
+  defp log_dispatch_config_error(reason),
+    do: Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
@@ -1074,6 +1082,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        codex_totals: state.codex_totals,
+       runtime: state.runtime_status,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
          checking?: state.poll_check_in_progress == true,
@@ -1278,6 +1287,45 @@ defmodule SymphonyElixir.Orchestrator do
         max_concurrent_agents: Config.max_concurrent_agents()
     }
   end
+
+  defp refresh_execution_runtime_status(%State{} = state) do
+    runtime_status = Execution.runtime_status()
+    log_runtime_status_transition(Map.get(state, :runtime_status), runtime_status)
+    %{state | runtime_status: runtime_status}
+  end
+
+  defp runtime_ready?(%{ready: true}), do: true
+  defp runtime_ready?(_runtime_status), do: false
+
+  defp log_runtime_status_transition(previous, %{execution_backend: "temporal_k3s", ready: true} = current) do
+    if runtime_status_signature(previous) != runtime_status_signature(current) do
+      Logger.info("Temporal/K3s runtime ready for dispatch")
+    end
+  end
+
+  defp log_runtime_status_transition(previous, %{execution_backend: "temporal_k3s", ready: false, blockers: blockers} = current) do
+    if runtime_status_signature(previous) != runtime_status_signature(current) do
+      Enum.each(blockers, fn blocker ->
+        Logger.error("Temporal/K3s runtime blocker #{runtime_blocker_code(blocker)}: #{runtime_blocker_message(blocker)}")
+      end)
+    end
+  end
+
+  defp log_runtime_status_transition(_previous, _current), do: :ok
+
+  defp runtime_status_signature(%{execution_backend: backend, ready: ready, blockers: blockers}) do
+    {backend, ready, Enum.map(blockers || [], &{runtime_blocker_code(&1), runtime_blocker_message(&1)})}
+  end
+
+  defp runtime_status_signature(_runtime_status), do: nil
+
+  defp runtime_blocker_code(%{"code" => code}) when is_binary(code), do: code
+  defp runtime_blocker_code(%{code: code}) when is_binary(code), do: code
+  defp runtime_blocker_code(_blocker), do: "unknown"
+
+  defp runtime_blocker_message(%{"message" => message}) when is_binary(message), do: message
+  defp runtime_blocker_message(%{message: message}) when is_binary(message), do: message
+  defp runtime_blocker_message(blocker), do: inspect(blocker)
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
