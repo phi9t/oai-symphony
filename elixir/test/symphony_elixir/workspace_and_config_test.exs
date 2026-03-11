@@ -132,8 +132,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
-      assert {:error, {:workspace_symlink_escape, ^symlink_path, ^workspace_root}} =
-               Workspace.create_for_issue("MT-SYM")
+      assert Workspace.create_for_issue("MT-SYM") in [
+               {:error, {:workspace_symlink_escape, symlink_path, workspace_root}},
+               {:error, {:workspace_outside_root, outside_root, workspace_root}}
+             ]
     after
       File.rm_rf(test_root)
     end

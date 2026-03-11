@@ -772,7 +772,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       }
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot =
+      wait_for_snapshot(
+        pid,
+        fn
+          %{polling: %{checking?: false, poll_interval_ms: 30_000, next_poll_in_ms: due_in_ms}}
+          when is_integer(due_in_ms) ->
+            true
+
+          _ ->
+            false
+        end,
+        500
+      )
 
     assert %{
              polling: %{

@@ -290,12 +290,19 @@ defmodule SymphonyElixir.Config do
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
-    validated_workflow_options()
-    |> atom_keys_to_string_keys()
-    |> Schema.parse()
-  rescue
-    error in [ArgumentError] ->
-      {:error, {:invalid_workflow_config, Exception.message(error)}}
+    case current_workflow() do
+      {:ok, %{config: config}} when is_map(config) ->
+        config
+        |> normalize_keys()
+        |> schema_settings_payload()
+        |> Schema.parse()
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _ ->
+        Schema.parse(%{})
+    end
   end
 
   @spec settings!() :: Schema.t()
@@ -553,12 +560,9 @@ defmodule SymphonyElixir.Config do
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
-    case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
-      {:ok, policy} ->
-        policy
-
-      {:error, reason} ->
-        raise ArgumentError, message: "Invalid codex turn sandbox policy: #{inspect(reason)}"
+    case resolve_codex_turn_sandbox_policy(workspace) do
+      {:ok, turn_sandbox_policy} -> turn_sandbox_policy
+      {:error, _reason} -> default_codex_turn_sandbox_policy(workspace)
     end
   end
 
@@ -618,7 +622,7 @@ defmodule SymphonyElixir.Config do
 
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
-    with {:ok, _workflow} <- current_workflow(),
+    with {:ok, _settings} <- settings(),
          :ok <- require_tracker_kind(),
          :ok <- require_execution_kind(),
          :ok <- require_linear_token(),
@@ -627,7 +631,8 @@ defmodule SymphonyElixir.Config do
          :ok <- require_org_root_id(),
          :ok <- require_org_emacsclient_command(),
          :ok <- require_temporal_helper_command(),
-         :ok <- require_repository_origin_url(),
+          :ok <- require_repository_origin_url(),
+         :ok <- require_valid_codex_policy_settings(),
          :ok <- require_valid_codex_runtime_settings() do
       require_codex_command()
     end
@@ -776,6 +781,14 @@ defmodule SymphonyElixir.Config do
     case codex_runtime_settings() do
       {:ok, _settings} -> :ok
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp require_valid_codex_policy_settings do
+    with {:ok, _approval_policy} <- resolve_codex_approval_policy(),
+         {:ok, _thread_sandbox} <- resolve_codex_thread_sandbox(),
+         {:ok, _turn_sandbox_policy} <- resolve_codex_turn_sandbox_policy(nil) do
+      :ok
     end
   end
 
@@ -1377,21 +1390,6 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp atom_keys_to_string_keys(value) when is_map(value) do
-    Enum.reduce(value, %{}, fn {key, nested}, acc ->
-      normalized_key =
-        case key do
-          atom when is_atom(atom) -> Atom.to_string(atom)
-          other -> to_string(other)
-        end
-
-      Map.put(acc, normalized_key, atom_keys_to_string_keys(nested))
-    end)
-  end
-
-  defp atom_keys_to_string_keys(value) when is_list(value), do: Enum.map(value, &atom_keys_to_string_keys/1)
-  defp atom_keys_to_string_keys(value), do: value
-
   defp format_config_error(reason) do
     case reason do
       {:invalid_workflow_config, message} ->
@@ -1410,4 +1408,51 @@ defmodule SymphonyElixir.Config do
         "Invalid WORKFLOW.md config: #{inspect(other)}"
     end
   end
+
+  defp schema_settings_payload(config) when is_map(config) do
+    %{
+      "tracker" => schema_tracker_payload(section_map(config, "tracker")),
+      "polling" => section_map(config, "polling"),
+      "workspace" => section_map(config, "workspace"),
+      "agent" => section_map(config, "agent"),
+      "codex" => schema_codex_payload(section_map(config, "codex")),
+      "hooks" => section_map(config, "hooks"),
+      "observability" => section_map(config, "observability"),
+      "server" => section_map(config, "server")
+    }
+  end
+
+  defp schema_tracker_payload(section) when is_map(section) do
+    section
+    |> Map.update("kind", nil, &normalize_tracker_kind/1)
+    |> Map.update("active_states", nil, &schema_csv_or_list_value/1)
+    |> Map.update("terminal_states", nil, &schema_csv_or_list_value/1)
+  end
+
+  defp schema_tracker_payload(_section), do: %{}
+
+  defp schema_codex_payload(section) when is_map(section) do
+    case Map.get(section, "turn_sandbox_policy") do
+      nil ->
+        section
+
+      policy when is_map(policy) ->
+        section
+
+      _other ->
+        Map.delete(section, "turn_sandbox_policy")
+    end
+  end
+
+  defp schema_codex_payload(_section), do: %{}
+
+  defp schema_csv_or_list_value(nil), do: nil
+
+  defp schema_csv_or_list_value(values) when is_list(values) do
+    values
+    |> Enum.map(&scalar_string_value/1)
+    |> Enum.reject(&(&1 in [:omit, ""]))
+  end
+
+  defp schema_csv_or_list_value(value), do: value
 end
