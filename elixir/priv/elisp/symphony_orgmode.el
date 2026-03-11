@@ -66,6 +66,24 @@
                                      (symphony-orgmode--request request "task_id")
                                      state-map)
                                     (or (symphony-orgmode--request request "content") "")))))
+                    ("deep_dive"
+                     (symphony-orgmode--deep-dive
+                      (symphony-orgmode--task-position
+                       root-pos
+                       (symphony-orgmode--request request "task_id")
+                       state-map)
+                      (or (symphony-orgmode--request request "content") "")))
+                    ("deep_revision"
+                     (symphony-orgmode--deep-revision
+                      root-pos
+                      (symphony-orgmode--task-position
+                       root-pos
+                       (symphony-orgmode--request request "task_id")
+                       state-map)
+                      (or (symphony-orgmode--request request "mode") "draft")
+                      (or (symphony-orgmode--request request "content") "")
+                      (or (symphony-orgmode--request request "tasks") '())
+                      state-map))
                     ("set_state"
                      (symphony-orgmode--set-state
                       (symphony-orgmode--task-position
@@ -193,10 +211,14 @@
 (defun symphony-orgmode--heading-title (state-map)
   (let ((title (org-get-heading t t t t))
         (todo-keyword (symphony-orgmode--heading-todo-keyword state-map)))
-    (if (and todo-keyword
-             (string-prefix-p (concat todo-keyword " ") title))
-        (substring title (1+ (length todo-keyword)))
-      title)))
+    (let ((normalized
+           (if (and todo-keyword
+                    (string-prefix-p (concat todo-keyword " ") title))
+               (substring title (1+ (length todo-keyword)))
+             title)))
+      (if (string-match "\\`\\[#[A-C]\\]\\s-+\\(.*\\)\\'" normalized)
+          (match-string 1 normalized)
+        normalized))))
 
 (defun symphony-orgmode--description ()
   (save-excursion
@@ -227,6 +249,37 @@
       (symphony-orgmode--replace-section-body workpad-pos content)
       (symphony-orgmode--workpad-content task-pos))))
 
+(defun symphony-orgmode--replace-direct-child-section (task-pos title content)
+  (save-excursion
+    (goto-char task-pos)
+    (let ((section-pos (or (symphony-orgmode--direct-child-heading task-pos title)
+                           (symphony-orgmode--insert-direct-child-heading task-pos title))))
+      (symphony-orgmode--replace-section-body section-pos content)
+      (symphony-orgmode--section-body section-pos))))
+
+(defun symphony-orgmode--deep-dive (task-pos content)
+  (save-excursion
+    (goto-char task-pos)
+    `((taskId . ,(symphony-orgmode--identifier-at-point))
+      (section . "Deep Dive")
+      (content . ,(symphony-orgmode--replace-direct-child-section task-pos "Deep Dive" content)))))
+
+(defun symphony-orgmode--deep-revision (root-pos task-pos mode content tasks state-map)
+  (let* ((section-title (if (string= mode "create") "Deep Revision" "Planning Draft"))
+         (updated-content
+          (symphony-orgmode--replace-direct-child-section task-pos section-title content))
+         (created-tasks
+          (if (string= mode "create")
+              (symphony-orgmode--create-revision-tasks root-pos task-pos tasks state-map)
+            '())))
+    (save-excursion
+      (goto-char task-pos)
+      `((taskId . ,(symphony-orgmode--identifier-at-point))
+        (section . ,section-title)
+        (mode . ,mode)
+        (content . ,updated-content)
+        (createdTasks . ,created-tasks)))))
+
 (defun symphony-orgmode--set-state (task-pos state-name state-map)
   (save-excursion
     (goto-char task-pos)
@@ -235,6 +288,124 @@
         (error "state_not_found"))
       (symphony-orgmode--replace-todo-keyword todo-keyword)
       (symphony-orgmode--task-data task-pos state-map))))
+
+(defun symphony-orgmode--create-revision-tasks (root-pos source-task-pos tasks state-map)
+  (let ((identifier-prefix (or (symphony-orgmode--identifier-prefix source-task-pos)
+                               "TASK-")))
+    (mapcar
+     (lambda (task)
+       (symphony-orgmode--create-task root-pos task identifier-prefix state-map))
+     tasks)))
+
+(defun symphony-orgmode--create-task (root-pos task identifier-prefix state-map)
+  (let* ((title (or (symphony-orgmode--request task "title") "Untitled task"))
+         (display-state (or (symphony-orgmode--request task "state") "Backlog"))
+         (todo-keyword (symphony-orgmode--todo-keyword-for-state display-state state-map))
+         (identifier (or (symphony-orgmode--request task "identifier")
+                         (symphony-orgmode--next-generated-identifier
+                          root-pos identifier-prefix state-map)))
+         (priority (symphony-orgmode--request task "priority"))
+         (labels (or (symphony-orgmode--request task "labels") '()))
+         (body (or (symphony-orgmode--request task "body") "")))
+    (unless todo-keyword
+      (error "state_not_found"))
+    (when (symphony-orgmode--identifier-exists-p root-pos identifier state-map)
+      (error "duplicate_identifier"))
+    (let ((task-pos (symphony-orgmode--insert-direct-child-heading root-pos title)))
+      (save-excursion
+        (goto-char task-pos)
+        (symphony-orgmode--write-heading task-pos todo-keyword priority title labels)
+        (org-entry-put (point) "SYMPHONY_IDENTIFIER" identifier)
+        (symphony-orgmode--ensure-id)
+        (symphony-orgmode--replace-section-body task-pos body)
+        (symphony-orgmode--insert-direct-child-heading task-pos "Codex Workpad")
+        (symphony-orgmode--task-data task-pos state-map)))))
+
+(defun symphony-orgmode--write-heading (task-pos todo-keyword priority title labels)
+  (save-excursion
+    (goto-char task-pos)
+    (let* ((level (org-outline-level))
+           (priority-cookie
+            (pcase priority
+              (1 " [#A]")
+              (2 " [#B]")
+              (3 " [#C]")
+              (_ "")))
+           (tags-suffix
+            (if (and labels (> (length labels) 0))
+                (concat " :" (string-join labels ":") ":")
+              "")))
+      (beginning-of-line)
+      (delete-region (line-beginning-position) (line-end-position))
+      (insert (make-string level ?*)
+              " "
+              todo-keyword
+              priority-cookie
+              " "
+              title
+              tags-suffix))))
+
+(defun symphony-orgmode--identifier-at-point ()
+  (let ((id (symphony-orgmode--ensure-id))
+        (custom-id (org-entry-get (point) "CUSTOM_ID")))
+    (or (org-entry-get (point) "SYMPHONY_IDENTIFIER")
+        custom-id
+        id)))
+
+(defun symphony-orgmode--identifier-prefix (task-pos)
+  (save-excursion
+    (goto-char task-pos)
+    (let ((identifier (symphony-orgmode--identifier-at-point)))
+      (when (and identifier
+                 (string-match "\\`\\(.+-\\)[0-9]+\\'" identifier))
+        (match-string 1 identifier)))))
+
+(defun symphony-orgmode--next-generated-identifier (root-pos prefix state-map)
+  (let ((max-suffix 0))
+    (dolist (task-pos (symphony-orgmode--task-positions root-pos state-map))
+      (save-excursion
+        (goto-char task-pos)
+        (let ((identifier (symphony-orgmode--identifier-at-point)))
+          (when (and identifier
+                     (string-match
+                      (format "\\`%s\\([0-9]+\\)\\'" (regexp-quote prefix))
+                      identifier))
+            (setq max-suffix
+                  (max max-suffix
+                       (string-to-number (match-string 1 identifier))))))))
+    (format "%s%d" prefix (1+ max-suffix))))
+
+(defun symphony-orgmode--identifier-exists-p (root-pos identifier state-map)
+  (seq-find
+   (lambda (task-pos)
+     (save-excursion
+       (goto-char task-pos)
+       (let ((task-identifier (symphony-orgmode--identifier-at-point)))
+         (and task-identifier
+              (string= task-identifier identifier)))))
+   (symphony-orgmode--task-positions root-pos state-map)))
+
+(defun symphony-orgmode--set-priority (priority)
+  (let ((cookie
+         (pcase priority
+           (1 "[#A] ")
+           (2 "[#B] ")
+           (3 "[#C] ")
+           (_ nil))))
+    (save-excursion
+      (org-back-to-heading t)
+      (beginning-of-line)
+      (when (re-search-forward "\\s-+\\[#[A-C]\\]\\s-*" (line-end-position) t)
+        (replace-match " "))
+      (when cookie
+        (beginning-of-line)
+        (when (re-search-forward "^\\*+\\s-+\\(?:[[:upper:]_]+\\s-+\\)?" (line-end-position) t)
+          (insert cookie))))))
+
+(defun symphony-orgmode--set-labels (labels)
+  (if (and labels (> (length labels) 0))
+      (org-set-tags-to (format ":%s:" (string-join labels ":")))
+    (org-set-tags-to nil)))
 
 (defun symphony-orgmode--todo-keyword-for-state (state-name state-map)
   (car

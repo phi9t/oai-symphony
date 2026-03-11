@@ -158,6 +158,20 @@ No workpad was synced from Org.
 4. Run the required validation before concluding the run.
 5. If blocked, record the blocker in both the workpad and `run-result.json`.
 
+## Planning conventions
+
+When a repo-specific workflow exposes `org_task` planning actions, use them intentionally:
+
+- Use `org_task.deep_dive` for structural analysis, architecture review, or failure investigation
+  that should stay on the current task.
+- Use `org_task.deep_revision` with `mode: "draft"` when the next work is still uncertain and
+  should be discussed before new tasks are created.
+- Use `org_task.deep_revision` with `mode: "create"` only for clear top-level follow-on tasks that
+  already have description, acceptance criteria, priority, and validation steps. Created tasks
+  should start with an empty `Codex Workpad`.
+- If the follow-on work is really a major architecture, runtime, or process proposal, write or
+  update an RFC in `docs/rfcs/` instead of creating implementation tasks immediately.
+
 ## `run-result.json` contract
 
 - Successful ready-for-review run:

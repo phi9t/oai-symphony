@@ -78,6 +78,10 @@ defmodule SymphonyElixir.TestSupport.RecoveryScenarioHarness do
 
   def assert_eventually(_fun, 0), do: flunk("condition not met in time")
 
+  def with_temporal_helper_lock(fun) when is_function(fun, 0) do
+    :global.trans({__MODULE__, :temporal_helper_lock}, fun)
+  end
+
   def orchestrated_retry_run_events(trace_path) do
     if File.exists?(trace_path) do
       runs =
@@ -615,73 +619,74 @@ defmodule SymphonyElixir.TestSupport.RecoveryScenarioHarness do
     end
 
     def run_scenario(:restart_recovery) do
-      previous_org_client_module = Application.get_env(:symphony_elixir, :org_client_module)
+      RecoveryScenarioHarness.with_temporal_helper_lock(fn ->
+        previous_org_client_module = Application.get_env(:symphony_elixir, :org_client_module)
 
-      Application.put_env(:symphony_elixir, :org_client_module, StatefulRetryOrgClient)
-      Application.put_env(:symphony_elixir, :temporal_harness_test_recipient, self())
+        Application.put_env(:symphony_elixir, :org_client_module, StatefulRetryOrgClient)
+        Application.put_env(:symphony_elixir, :temporal_harness_test_recipient, self())
 
-      {:ok, issue_store} =
-        Agent.start_link(fn ->
-          [
-            %Issue{
-              id: "issue-remote-orchestrated-retry",
-              identifier: "REV-15",
-              title: "Retry through orchestrator",
-              description: "Exercise the real retry path",
-              state: "In Progress"
-            }
-          ]
-        end)
+        {:ok, issue_store} =
+          Agent.start_link(fn ->
+            [
+              %Issue{
+                id: "issue-remote-orchestrated-retry",
+                identifier: "REV-15",
+                title: "Retry through orchestrator",
+                description: "Exercise the real retry path",
+                state: "In Progress"
+              }
+            ]
+          end)
 
-      Application.put_env(:symphony_elixir, :temporal_harness_issue_store, issue_store)
+        Application.put_env(:symphony_elixir, :temporal_harness_issue_store, issue_store)
 
-      helper_root =
-        RecoveryScenarioHarness.tmp_root("symphony-temporal-orchestrator-retry")
+        helper_root =
+          RecoveryScenarioHarness.tmp_root("symphony-temporal-orchestrator-retry")
 
-      helper_script = Path.join(helper_root, "fake-temporal-helper.py")
-      helper_trace = Path.join(helper_root, "temporal-helper-trace.jsonl")
-      k3s_project_root = Path.join(helper_root, "projects")
-      previous_trace = System.get_env("SYMPHONY_TEMPORAL_TRACE")
+        helper_script = Path.join(helper_root, "fake-temporal-helper.py")
+        helper_trace = Path.join(helper_root, "temporal-helper-trace.jsonl")
+        k3s_project_root = Path.join(helper_root, "projects")
+        previous_trace = System.get_env("SYMPHONY_TEMPORAL_TRACE")
 
-      File.mkdir_p!(k3s_project_root)
+        File.mkdir_p!(k3s_project_root)
 
-      RecoveryScenarioHarness.write_executable!(
-        helper_script,
-        """
-        #!/usr/bin/env python3
-        import json
-        import os
-        import sys
+        RecoveryScenarioHarness.write_executable!(
+          helper_script,
+          """
+          #!/usr/bin/env python3
+          import json
+          import os
+          import sys
 
-        def load_json(path):
+          def load_json(path):
             with open(path, "r", encoding="utf-8") as handle:
                 return json.load(handle)
 
-        def write_json(path, payload):
+          def write_json(path, payload):
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
 
-        def append_event(path, payload):
+          def append_event(path, payload):
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload) + "\\n")
 
-        def parse_input_path(argv):
+          def parse_input_path(argv):
             for index, arg in enumerate(argv):
                 if arg == "--input":
                     return argv[index + 1]
             raise RuntimeError("--input argument missing")
 
-        subcommand = sys.argv[1]
-        payload = load_json(parse_input_path(sys.argv))
-        trace_path = os.environ["SYMPHONY_TEMPORAL_TRACE"]
-        state_path = trace_path + ".state.json"
+          subcommand = sys.argv[1]
+          payload = load_json(parse_input_path(sys.argv))
+          trace_path = os.environ["SYMPHONY_TEMPORAL_TRACE"]
+          state_path = trace_path + ".state.json"
 
-        if os.path.exists(state_path):
+          if os.path.exists(state_path):
             state = load_json(state_path)
-        else:
+          else:
             state = {"runs": []}
 
-        if subcommand == "run":
+          if subcommand == "run":
             run_number = len(state["runs"]) + 1
             run_id = "run-%03d" % run_number
             run = {
@@ -720,7 +725,7 @@ defmodule SymphonyElixir.TestSupport.RecoveryScenarioHarness do
                     }
                 )
             )
-        elif subcommand == "status":
+          elif subcommand == "status":
             run = next(item for item in state["runs"] if item["workflowId"] == payload["workflowId"])
             append_event(
                 trace_path,
@@ -767,83 +772,109 @@ defmodule SymphonyElixir.TestSupport.RecoveryScenarioHarness do
                 }
 
             print(json.dumps(response))
-        else:
+          elif subcommand == "readiness":
+            print(
+                json.dumps(
+                    {
+                        "ready": True,
+                        "blockers": [],
+                        "temporal": {
+                            "address": payload["temporal"]["address"],
+                            "namespace": payload["temporal"]["namespace"],
+                            "taskQueue": payload["temporal"]["taskQueue"],
+                            "reachable": True,
+                            "namespaceReady": True,
+                            "workerReady": True,
+                            "workflowPollers": 1,
+                            "activityPollers": 1,
+                        },
+                        "k3s": {
+                            "namespace": payload["k3s"]["namespace"],
+                            "namespaceReady": True,
+                            "launcherPath": "/tmp/fake-sjob",
+                            "kubectlCommand": "/tmp/fake-kubectl",
+                        },
+                    }
+                )
+            )
+          else:
             print(json.dumps({"workflowId": payload.get("workflowId"), "status": "unknown"}))
-        """
-      )
-
-      System.put_env("SYMPHONY_TEMPORAL_TRACE", helper_trace)
-
-      try do
-        TestSupport.write_workflow_file!(Workflow.workflow_file_path(),
-          tracker_kind: "orgmode",
-          tracker_file: "/tmp/revision-plan.org",
-          tracker_root_id: "root-id",
-          execution_kind: "temporal_k3s",
-          repository_origin_url: "https://example.com/repo.git",
-          temporal_helper_command: helper_script,
-          temporal_address: "temporal.example:7233",
-          temporal_namespace: "customer-a",
-          temporal_status_poll_ms: 1,
-          poll_interval_ms: 5_000,
-          max_retry_backoff_ms: 1,
-          k3s_project_root: k3s_project_root
+          """
         )
 
-        orchestrator_name = Module.concat(__MODULE__, :RemoteRetryOrchestrator)
+        System.put_env("SYMPHONY_TEMPORAL_TRACE", helper_trace)
 
-        log =
-          capture_log(fn ->
-            {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+        try do
+          TestSupport.write_workflow_file!(Workflow.workflow_file_path(),
+            tracker_kind: "orgmode",
+            tracker_file: "/tmp/revision-plan.org",
+            tracker_root_id: "root-id",
+            execution_kind: "temporal_k3s",
+            repository_origin_url: "https://example.com/repo.git",
+            temporal_helper_command: helper_script,
+            temporal_address: "temporal.example:7233",
+            temporal_namespace: "customer-a",
+            temporal_status_poll_ms: 1,
+            poll_interval_ms: 5_000,
+            max_retry_backoff_ms: 1,
+            k3s_project_root: k3s_project_root
+          )
 
-            try do
-              RecoveryScenarioHarness.assert_eventually(
-                fn ->
-                  match?(
-                    {:ok, [_, _]},
-                    RecoveryScenarioHarness.orchestrated_retry_run_events(helper_trace)
-                  )
-                end,
-                120
-              )
+          orchestrator_name = Module.concat(__MODULE__, :RemoteRetryOrchestrator)
 
-              assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"},
-                             1_000
+          log =
+            capture_log(fn ->
+              {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
-              assert {:ok, [first_run, second_run]} =
-                       RecoveryScenarioHarness.orchestrated_retry_run_events(helper_trace)
+              try do
+                RecoveryScenarioHarness.assert_eventually(
+                  fn ->
+                    match?(
+                      {:ok, [_, _]},
+                      RecoveryScenarioHarness.orchestrated_retry_run_events(helper_trace)
+                    )
+                  end,
+                  120
+                )
 
-              assert first_run["workflowId"] == "issue/issue-remote-orchestrated-retry"
-              assert first_run["projectId"] == "REV-15"
-              assert first_run["jobName"] == "symphony-job-REV-15"
+                assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"},
+                               1_000
 
-              assert second_run["workflowId"] != first_run["workflowId"]
-              assert second_run["workflowId"] =~ "/attempt-1-"
-              assert second_run["projectId"] != first_run["projectId"]
-              assert String.starts_with?(second_run["projectId"], "REV-15-attempt-1-")
-              assert second_run["jobName"] != first_run["jobName"]
-              assert String.starts_with?(second_run["jobName"], "symphony-job-REV-15-attempt-1-")
-              assert second_run["workspacePath"] != first_run["workspacePath"]
-            after
-              if Process.alive?(pid) do
-                Process.exit(pid, :normal)
+                assert {:ok, [first_run, second_run]} =
+                         RecoveryScenarioHarness.orchestrated_retry_run_events(helper_trace)
+
+                assert first_run["workflowId"] == "issue/issue-remote-orchestrated-retry"
+                assert first_run["projectId"] == "REV-15"
+                assert first_run["jobName"] == "symphony-job-REV-15"
+
+                assert second_run["workflowId"] != first_run["workflowId"]
+                assert second_run["workflowId"] =~ "/attempt-1-"
+                assert second_run["projectId"] != first_run["projectId"]
+                assert String.starts_with?(second_run["projectId"], "REV-15-attempt-1-")
+                assert second_run["jobName"] != first_run["jobName"]
+                assert second_run["jobName"] =~ "symphony-job-REV-15-attempt-1-"
+                assert second_run["workspacePath"] != first_run["workspacePath"]
+              after
+                if Process.alive?(pid) do
+                  Process.exit(pid, :normal)
+                end
               end
-            end
-          end)
+            end)
 
-        assert log =~ "scheduling retry"
-      after
-        RecoveryScenarioHarness.restore_env("SYMPHONY_TEMPORAL_TRACE", previous_trace)
-        RecoveryScenarioHarness.restore_app_env(:temporal_harness_test_recipient, nil)
-        RecoveryScenarioHarness.restore_app_env(:temporal_harness_issue_store, nil)
-        RecoveryScenarioHarness.restore_app_env(:org_client_module, previous_org_client_module)
+          assert log =~ "scheduling retry"
+        after
+          RecoveryScenarioHarness.restore_env("SYMPHONY_TEMPORAL_TRACE", previous_trace)
+          RecoveryScenarioHarness.restore_app_env(:temporal_harness_test_recipient, nil)
+          RecoveryScenarioHarness.restore_app_env(:temporal_harness_issue_store, nil)
+          RecoveryScenarioHarness.restore_app_env(:org_client_module, previous_org_client_module)
 
-        if Process.alive?(issue_store) do
-          Agent.stop(issue_store)
+          if Process.alive?(issue_store) do
+            Agent.stop(issue_store)
+          end
+
+          File.rm_rf(helper_root)
         end
-
-        File.rm_rf(helper_root)
-      end
+      end)
     end
 
     def run_scenario(:cancellation) do

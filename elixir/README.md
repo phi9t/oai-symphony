@@ -99,6 +99,75 @@ mise exec -- ./elixir/bin/symphony ./.symphony/local-bootstrap-workflow.md
 mise exec -- ./elixir/bin/symphony ./.symphony/fork-self-land-workflow.md
 ```
 
+## Org Planning Runs
+
+When a repo-local Org workflow exposes `org_task`, use the planning actions deliberately:
+
+- `org_task.deep_dive` records structural analysis, architecture review, or failure investigation on
+  the current task.
+- `org_task.deep_revision` with `mode: "draft"` records uncertain follow-on work that still needs
+  human discussion.
+- `org_task.deep_revision` with `mode: "create"` should only be used for implementation-ready
+  follow-on tasks. Each proposed task must include a description, acceptance criteria, priority,
+  and validation steps; Symphony creates those tasks as direct children of the configured Org root
+  and inserts an empty `Codex Workpad` heading for each one.
+- If the next work is a major architecture, runtime, or process proposal, stop at an RFC under
+  `docs/rfcs/` until the proposal has review votes and the task boundaries are clear.
+
+Manual Org planning smoke:
+
+1. Create a temporary Org file with a Symphony root heading and one parent task identifier.
+2. Point a temporary workflow at that file and override `tracker.emacsclient_command` to
+   `emacs -Q --batch` so the smoke does not depend on a running Emacs server.
+3. Run `Org.Client.deep_dive/2`, then `Org.Client.deep_revision/4` in `draft` and `create` modes:
+
+```bash
+cd elixir
+mix run --no-start -e '
+tmp = Path.join(System.tmp_dir!(), "symphony-org-planning-smoke-#{System.unique_integer([:positive])}")
+File.mkdir_p!(tmp)
+org_file = Path.join(tmp, "planning.org")
+workflow_file = Path.join(tmp, "WORKFLOW.md")
+
+File.write!(org_file, """
+* Symphony Root
+:PROPERTIES:
+:ID: ROOT-PLANNING
+:END:
+** TODO [#B] Planning parent :planning:
+:PROPERTIES:
+:ID: parent-id
+:SYMPHONY_IDENTIFIER: REV-PLANNING
+:END:
+Parent task description.
+
+*** Codex Workpad
+""")
+
+File.write!(workflow_file, """
+---
+tracker:
+  kind: "orgmode"
+  file: "#{org_file}"
+  root_id: "ROOT-PLANNING"
+  emacsclient_command: "emacs -Q --batch"
+  state_map:
+    BACKLOG: "Backlog"
+    TODO: "Todo"
+    DONE: "Done"
+---
+planning smoke
+""")
+
+:ok = SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+:ok = SymphonyElixir.WorkflowStore.force_reload()
+
+IO.inspect(SymphonyElixir.Org.Client.deep_dive("REV-PLANNING", "### Summary\nStructural review"))
+IO.inspect(SymphonyElixir.Org.Client.deep_revision("REV-PLANNING", "draft", "### Revision Summary\nDraft follow-on work", [%{"title" => "Draft follow-on task", "state" => "Backlog", "priority" => 2, "labels" => ["planning"], "body" => "Draft body\n\n### Acceptance Criteria\n- Decide scope\n\n### Validation / Verification\n- Review with maintainers"}]))
+IO.inspect(SymphonyElixir.Org.Client.deep_revision("REV-PLANNING", "create", "### Revision Summary\nCreate follow-on work", [%{"title" => "Create top-level follow-on task", "state" => "Backlog", "priority" => 1, "labels" => ["planning", "orgmode"], "body" => "Task description\n\n### Acceptance Criteria\n- Task is created at the Org root\n\n### Validation / Verification\n- Inspect the created task"}]))
+'
+```
+
 ## Self-Landing Queue Smoke
 
 Use the Temporal workflow when you want Symphony to implement the task through Temporal/K3s, push

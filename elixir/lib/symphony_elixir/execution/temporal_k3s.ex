@@ -159,10 +159,9 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp fetch_workpad(%Issue{id: issue_id}) when is_binary(issue_id) do
-    if Config.tracker_kind() == "orgmode" do
-      fetch_org_workpad(issue_id)
-    else
-      @default_workpad
+    case Config.tracker_kind() do
+      "orgmode" -> fetch_org_workpad(issue_id)
+      _ -> @default_workpad
     end
   end
 
@@ -344,31 +343,35 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp maybe_replace_org_workpad(%Issue{id: issue_id} = issue, content)
        when is_binary(issue_id) and is_binary(content) do
-    if Config.tracker_kind() == "orgmode" do
-      case Adapter.replace_workpad(issue_id, content) do
-        {:ok, _content} ->
-          :ok
+    case Config.tracker_kind() do
+      "orgmode" ->
+        case Adapter.replace_workpad(issue_id, content) do
+          {:ok, _content} ->
+            :ok
 
-        {:error, reason} ->
-          raise RuntimeError,
-                "Temporal/K3s failed to sync Org workpad for #{issue_context(issue)}: #{inspect(reason)}"
-      end
+          {:error, reason} ->
+            raise RuntimeError,
+                  "Temporal/K3s failed to sync Org workpad for #{issue_context(issue)}: #{inspect(reason)}"
+        end
+
+      _ ->
+        :ok
     end
-
-    :ok
   end
 
   defp maybe_replace_org_workpad(_issue, _content), do: :ok
 
   defp maybe_apply_run_result_state(%Issue{id: issue_id} = issue, %{} = result)
        when is_binary(issue_id) do
-    if Config.tracker_kind() == "orgmode" do
-      result
-      |> target_state_from_run_result()
-      |> maybe_sync_org_state!(issue, issue_id)
-    end
+    case Config.tracker_kind() do
+      "orgmode" ->
+        result
+        |> target_state_from_run_result()
+        |> maybe_sync_org_state!(issue, issue_id)
 
-    :ok
+      _ ->
+        :ok
+    end
   end
 
   defp maybe_apply_run_result_state(_issue, _result), do: :ok
@@ -381,7 +384,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp maybe_sync_org_state!(target_state, issue, issue_id) do
-    if is_binary(target_state) and allowed_target_state?(target_state) do
+    if allowed_target_state?(target_state) do
       case Tracker.update_issue_state(issue_id, target_state) do
         :ok ->
           :ok
