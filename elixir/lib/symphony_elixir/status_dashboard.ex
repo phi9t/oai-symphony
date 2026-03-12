@@ -7,7 +7,7 @@ defmodule SymphonyElixir.StatusDashboard do
   require Logger
 
   alias SymphonyElixir.{Config, HttpServer}
-  alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.StatusDashboard.Snapshot
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @minimum_idle_rerender_ms 1_000
@@ -303,7 +303,7 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp snapshot_with_samples(token_samples, now_ms) do
-    case snapshot_payload() do
+    case Snapshot.fetch() do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         total_tokens = Map.get(codex_totals, :total_tokens, 0)
 
@@ -319,7 +319,7 @@ defmodule SymphonyElixir.StatusDashboard do
           update_token_samples(token_samples, now_ms, total_tokens)
         }
 
-      :error ->
+      _ ->
         {
           :error,
           prune_samples(token_samples, now_ms)
@@ -560,32 +560,6 @@ defmodule SymphonyElixir.StatusDashboard do
           String.t() | nil
   def dashboard_url_for_test(host, configured_port, bound_port),
     do: dashboard_url(host, configured_port, bound_port)
-
-  defp snapshot_payload do
-    if Process.whereis(Orchestrator) do
-      case Orchestrator.snapshot() do
-        %{
-          running: running,
-          retrying: retrying,
-          codex_totals: codex_totals
-        } = snapshot
-        when is_list(running) and is_list(retrying) ->
-          {:ok,
-           %{
-             running: running,
-             retrying: retrying,
-             codex_totals: codex_totals,
-             rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
-           }}
-
-        _ ->
-          :error
-      end
-    else
-      :error
-    end
-  end
 
   defp format_running_rows(running, running_event_width) do
     if running == [] do

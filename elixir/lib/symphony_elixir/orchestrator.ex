@@ -802,7 +802,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     %{
       state
-      | retry_attempts:
+      | claimed: MapSet.put(state.claimed, issue_id),
+        retry_attempts:
           Map.put(state.retry_attempts, issue_id, %{
             attempt: next_attempt,
             timer_ref: timer_ref,
@@ -927,6 +928,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
+  defp retry_delay(_attempt, %{delay_type: :manual}), do: 0
+
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
     if metadata[:delay_type] == :continuation and attempt == 1 do
       @continuation_retry_delay_ms
@@ -968,6 +971,40 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
+  defp find_issue_by_identifier(issues, issue_identifier) when is_binary(issue_identifier) do
+    Enum.find(issues, fn
+      %Issue{identifier: ^issue_identifier} ->
+        true
+
+      _ ->
+        false
+    end)
+  end
+
+  defp find_running_issue_by_identifier(running, issue_identifier) when is_map(running) and is_binary(issue_identifier) do
+    Enum.find(running, fn
+      {_issue_id, %{identifier: ^issue_identifier}} ->
+        true
+
+      _ ->
+        false
+    end)
+  end
+
+  defp find_running_issue_by_identifier(_running, _issue_identifier), do: nil
+
+  defp find_retry_entry_by_identifier(retry_attempts, issue_identifier) when is_map(retry_attempts) and is_binary(issue_identifier) do
+    Enum.find(retry_attempts, fn
+      {_issue_id, %{identifier: ^issue_identifier}} ->
+        true
+
+      _ ->
+        false
+    end)
+  end
+
+  defp find_retry_entry_by_identifier(_retry_attempts, _issue_identifier), do: nil
+
   defp find_issue_id_for_ref(running, ref) do
     running
     |> Enum.find_value(fn {issue_id, %{ref: running_ref}} ->
@@ -1004,6 +1041,48 @@ defmodule SymphonyElixir.Orchestrator do
       :unavailable
     end
   end
+
+  @spec request_retry(String.t()) :: map() | :invalid_issue_identifier | :issue_not_found | :unavailable
+  def request_retry(issue_identifier), do: request_retry(__MODULE__, issue_identifier)
+
+  @spec request_retry(GenServer.server(), String.t()) :: map() | :invalid_issue_identifier | :issue_not_found | :unavailable
+  def request_retry(server, issue_identifier) when is_binary(issue_identifier) do
+    issue_identifier = String.trim(issue_identifier)
+
+    cond do
+      issue_identifier == "" ->
+        :invalid_issue_identifier
+
+      Process.whereis(server) ->
+        GenServer.call(server, {:request_retry, issue_identifier})
+
+      true ->
+        :unavailable
+    end
+  end
+
+  def request_retry(_server, _issue_identifier), do: :invalid_issue_identifier
+
+  @spec request_cleanup(String.t()) :: map() | :invalid_issue_identifier | :unavailable
+  def request_cleanup(issue_identifier), do: request_cleanup(__MODULE__, issue_identifier)
+
+  @spec request_cleanup(GenServer.server(), String.t()) :: map() | :invalid_issue_identifier | :unavailable
+  def request_cleanup(server, issue_identifier) when is_binary(issue_identifier) do
+    issue_identifier = String.trim(issue_identifier)
+
+    cond do
+      issue_identifier == "" ->
+        :invalid_issue_identifier
+
+      Process.whereis(server) ->
+        GenServer.call(server, {:request_cleanup, issue_identifier})
+
+      true ->
+        :unavailable
+    end
+  end
+
+  def request_cleanup(_server, _issue_identifier), do: :invalid_issue_identifier
 
   @spec snapshot() :: map() | :timeout | :unavailable
   def snapshot, do: snapshot(__MODULE__, 15_000)
@@ -1096,6 +1175,18 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  def handle_call({:request_retry, issue_identifier}, _from, state) do
+    {reply, state} = request_retry_for_identifier(state, issue_identifier)
+    notify_dashboard()
+    {:reply, reply, state}
+  end
+
+  def handle_call({:request_cleanup, issue_identifier}, _from, state) do
+    {reply, state} = request_cleanup_for_identifier(state, issue_identifier)
+    notify_dashboard()
+    {:reply, reply, state}
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
@@ -1250,6 +1341,124 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pop_running_entry(state, issue_id) do
     {Map.get(state.running, issue_id), %{state | running: Map.delete(state.running, issue_id)}}
+  end
+
+  defp request_retry_for_identifier(%State{} = state, issue_identifier) do
+    case find_running_issue_by_identifier(state.running, issue_identifier) do
+      {issue_id, running_entry} ->
+        next_attempt = next_retry_attempt_from_running(running_entry) || 1
+
+        state =
+          state
+          |> terminate_running_issue(issue_id, false)
+          |> schedule_issue_retry(issue_id, next_attempt, %{
+            identifier: issue_identifier,
+            error: "manual retry requested",
+            delay_type: :manual
+          })
+
+        {retry_response(issue_identifier, "running"), state}
+
+      nil ->
+        case find_retry_entry_by_identifier(state.retry_attempts, issue_identifier) do
+          {issue_id, retry_entry} ->
+            attempt =
+              retry_entry
+              |> Map.get(:attempt, 1)
+              |> normalize_retry_attempt()
+              |> max(1)
+
+            state =
+              schedule_issue_retry(state, issue_id, attempt, %{
+                identifier: issue_identifier,
+                error: "manual retry requested",
+                delay_type: :manual
+              })
+
+            {retry_response(issue_identifier, "retry_queue"), state}
+
+          nil ->
+            enqueue_tracker_retry(state, issue_identifier)
+        end
+    end
+  end
+
+  defp enqueue_tracker_retry(%State{} = state, issue_identifier) do
+    case Tracker.fetch_candidate_issues() do
+      {:ok, issues} ->
+        case find_issue_by_identifier(issues, issue_identifier) do
+          %Issue{} = issue ->
+            state =
+              schedule_issue_retry(state, issue.id, 1, %{
+                identifier: issue.identifier,
+                error: "manual retry requested",
+                delay_type: :manual
+              })
+
+            {retry_response(issue.identifier, "tracker"), state}
+
+          nil ->
+            {:issue_not_found, state}
+        end
+
+      {:error, reason} ->
+        Logger.warning("Manual retry lookup failed for issue_identifier=#{issue_identifier}: #{inspect(reason)}")
+        {:issue_not_found, state}
+    end
+  end
+
+  defp request_cleanup_for_identifier(%State{} = state, issue_identifier) do
+    case find_running_issue_by_identifier(state.running, issue_identifier) do
+      {issue_id, _running_entry} ->
+        {cleanup_response(issue_identifier, "running"), terminate_running_issue(state, issue_id, true)}
+
+      nil ->
+        case find_retry_entry_by_identifier(state.retry_attempts, issue_identifier) do
+          {issue_id, _retry_entry} ->
+            cleanup_issue_workspace(issue_identifier, nil)
+            {cleanup_response(issue_identifier, "retry_queue"), drop_retry_attempt(state, issue_id)}
+
+          nil ->
+            cleanup_issue_workspace(issue_identifier, nil)
+            {cleanup_response(issue_identifier, "workspace"), state}
+        end
+    end
+  end
+
+  defp drop_retry_attempt(%State{} = state, issue_id) do
+    case Map.get(state.retry_attempts, issue_id) do
+      %{timer_ref: timer_ref} when is_reference(timer_ref) ->
+        Process.cancel_timer(timer_ref)
+
+      _ ->
+        :ok
+    end
+
+    %{
+      state
+      | retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        claimed: MapSet.delete(state.claimed, issue_id)
+    }
+  end
+
+  defp retry_response(issue_identifier, source) do
+    %{
+      queued: true,
+      issue_identifier: issue_identifier,
+      requested_at: DateTime.utc_now(),
+      source: source,
+      operations: ["retry"]
+    }
+  end
+
+  defp cleanup_response(issue_identifier, source) do
+    %{
+      completed: true,
+      issue_identifier: issue_identifier,
+      completed_at: DateTime.utc_now(),
+      source: source,
+      operations: ["cleanup"]
+    }
   end
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
