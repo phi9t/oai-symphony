@@ -179,6 +179,13 @@ Notes:
   GitHub-hosted runners can carry this stack.
 - The default Temporal helper command is now `./temporal/bin/symphony`, which works correctly from
   the repository root.
+- The operator-facing source of truth for remote command lookup, identifier correlation, evidence
+  locations, retention defaults, and retry-vs-repair guidance is
+  [`../docs/operations/validation-triage.md`](../docs/operations/validation-triage.md). Use the
+  companion [`../docs/operations/phase-1-remote-validation-matrix.md`](../docs/operations/phase-1-remote-validation-matrix.md)
+  for gate classes, owners, and pass evidence. As of March 12, 2026, GitHub Actions still only
+  runs `make -C elixir all`; repeated stack smoke remains operator-run or self-hosted, and
+  failure-injection work is later-phase rather than merge-blocking.
 
 ## Configuration
 

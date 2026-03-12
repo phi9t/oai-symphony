@@ -107,6 +107,7 @@ No workpad exists yet.
 11. Do not end a successful implementation in `Human Review`. Successful tasks must be committed, pushed, landed, and then moved to `Done`.
 12. If code is finished but the PR is still open or checks are pending, move the task to `Merging` and continue driving it to merge.
 13. If blocked or only partially complete, leave the task active or move it to `Rework` with a precise blocker.
+14. Use [`docs/operations/validation-triage.md`](docs/operations/validation-triage.md) for command lookup, evidence locations, and retry-vs-repair guidance, and use [`docs/operations/phase-1-remote-validation-matrix.md`](docs/operations/phase-1-remote-validation-matrix.md) for validation gate classes and pass evidence.
 
 ## Expected workflow
 
