@@ -149,8 +149,9 @@ No workpad was synced from Org.
    - `Validation`
    - `Notes`
 3. Capture a concrete reproduction signal before implementing.
-4. Run the required validation before concluding the run.
-5. If blocked, record the blocker in both the workpad and `run-result.json`.
+4. For this repository's remote backend, treat [`../docs/operations/phase-1-remote-validation-matrix.md`](../docs/operations/phase-1-remote-validation-matrix.md) as the source of truth for gate classes, contract authority, owners, and pass evidence along the `Org -> Elixir -> Temporal -> K3s -> Org` path.
+5. Run the required validation before concluding the run.
+6. If blocked, record the blocker in both the workpad and `run-result.json`.
 
 ## `run-result.json` contract
 
