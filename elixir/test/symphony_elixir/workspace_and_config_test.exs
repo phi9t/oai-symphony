@@ -1070,6 +1070,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              limits: {"state names must not be blank", []},
              limits: {"limits must be positive integers", []}
            ]
+
+    valid_changeset =
+      {%{}, %{limits: :map}}
+      |> Changeset.cast(%{limits: %{"todo" => 1}}, [:limits])
+      |> Schema.validate_state_limits(:limits)
+
+    assert valid_changeset.errors == []
   end
 
   test "schema parse normalizes policy keys and env-backed fallbacks" do

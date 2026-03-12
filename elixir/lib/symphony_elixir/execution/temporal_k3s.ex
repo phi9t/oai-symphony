@@ -291,11 +291,13 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
         Logger.warning("Temporal/K3s status check failed for #{issue_context(issue)} elapsed_ms=#{elapsed_ms} timeout_ms=#{timeout_ms}: #{inspect(reason)}")
 
-        if status_failure_timed_out?(elapsed_ms, timeout_ms) do
-          raise RuntimeError,
-                "Temporal/K3s status checks stalled for #{issue_context(issue)} after #{elapsed_ms}ms (timeout=#{timeout_ms}ms): #{inspect(reason)}"
-        else
-          do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms)
+        case status_failure_timed_out?(elapsed_ms, timeout_ms) do
+          true ->
+            raise RuntimeError,
+                  "Temporal/K3s status checks stalled for #{issue_context(issue)} after #{elapsed_ms}ms (timeout=#{timeout_ms}ms): #{inspect(reason)}"
+
+          false ->
+            do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms)
         end
     end
   end
@@ -366,11 +368,13 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
     case {normalized_workflow_status(status), run_result} do
       {status_name, %{} = result} when status_name in ["succeeded", "failed", "cancelled"] ->
-        if allowed_target_state?(target_state_from_run_result(result)) do
-          :ok
-        else
-          raise RuntimeError,
-                "Temporal/K3s run ended without a valid target state for #{issue_context(issue)}"
+        case allowed_target_state?(target_state_from_run_result(result)) do
+          true ->
+            :ok
+
+          false ->
+            raise RuntimeError,
+                  "Temporal/K3s run ended without a valid target state for #{issue_context(issue)}"
         end
 
       {"succeeded", _} ->
@@ -424,19 +428,22 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     end
   end
 
-  defp maybe_sync_org_state!(target_state, issue, issue_id)
-       when target_state in ["In Progress", "Human Review", "Rework", "Done"] do
-    case Tracker.update_issue_state(issue_id, target_state) do
-      :ok ->
-        :ok
+  defp maybe_sync_org_state!(target_state, issue, issue_id) do
+    with true <- is_binary(target_state),
+         true <- allowed_target_state?(target_state) do
+      case Tracker.update_issue_state(issue_id, target_state) do
+        :ok ->
+          :ok
 
-      {:error, reason} ->
-        raise RuntimeError,
-              "Temporal/K3s failed to sync Org state=#{target_state} for #{issue_context(issue)}: #{inspect(reason)}"
+        {:error, reason} ->
+          raise RuntimeError,
+                "Temporal/K3s failed to sync Org state=#{target_state} for #{issue_context(issue)}: #{inspect(reason)}"
+      end
+    else
+      _other ->
+        :ok
     end
   end
-
-  defp maybe_sync_org_state!(_target_state, _issue, _issue_id), do: :ok
 
   defp default_target_state(result) do
     cond do
@@ -563,7 +570,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
           |> Enum.filter(&project_root_entry_for_issue?(&1, base_project_id))
           |> Enum.map(&Path.join(project_root, &1))
 
-        if matches == [], do: [fallback_root], else: matches
+        case matches do
+          [] -> [fallback_root]
+          _entries -> matches
+        end
 
       {:error, _reason} ->
         [fallback_root]
