@@ -171,6 +171,12 @@ Notes:
 - Treat `./dev/temporal-k3s smoke` as the minimum operator-run system proof for the repo-managed
   remote runtime. It is the fastest trustworthy way to prove readiness, workflow submission, worker
   execution, K3s job completion, artifact creation, and retained evidence together.
+- `./dev/temporal-k3s smoke` defaults to `workflow_mode=phased`; run
+  `./dev/temporal-k3s smoke --workflow-mode vanilla` to prove the supported single-job fallback
+  lane with the same retained evidence contract.
+- Smoke evidence now writes `summary.txt` fields for `workflow_mode`, `expected_phase`,
+  `last_current_phase`, `last_workflow_status`, `last_job_status`, `failure_plane`, and
+  `failure_reason`, plus `blocker-plane.txt` on failures.
 - Real agent runs still need `k3s.image` to point at an image that contains `bash`, `git`, and a
   working implementation of your configured `codex.command`.
 - The equivalent repo-owned workflow to promote next is `./.symphony/temporal-self-land-workflow.md`.
@@ -235,6 +241,8 @@ Notes:
 - The remote backend requires a Temporal helper command plus `repository.origin_url`.
 - `temporal.workflow_mode` accepts `phased` or `vanilla`; `phased` is the default and `vanilla`
   keeps the original single-job remote path available as a fallback.
+- Remote lifecycle logs now use stable `event=... key=value` messages for dispatch, workflow
+  submission, phase start/completion/failure, status polling, artifact sync, and Org finalization.
 - `temporal.address` and `temporal.namespace` are forwarded to helper `run`, `status`, `cancel`,
   and `describe` requests, so remote lifecycle operations stay on the same Temporal cluster.
 - When Symphony retries a remote attempt, it generates a fresh `workflowId`, `projectId`, and K3s

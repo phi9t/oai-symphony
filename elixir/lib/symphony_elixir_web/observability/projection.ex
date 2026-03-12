@@ -9,22 +9,20 @@ defmodule SymphonyElixirWeb.Observability.Projection do
   @type snapshot_result :: {:ok, map()} | :timeout | :unavailable | :error
 
   @spec state_payload(snapshot_result(), DateTime.t()) :: map()
-  def state_payload(snapshot_result, generated_at \\ DateTime.utc_now())
+  def state_payload(snapshot_result, generated_at \\ DateTime.utc_now()) do
+    case snapshot_result do
+      {:ok, snapshot} ->
+        state_payload_from_snapshot(snapshot, generated_at)
 
-  def state_payload({:ok, snapshot}, generated_at) do
-    state_payload_from_snapshot(snapshot, generated_at)
-  end
+      :timeout ->
+        error_payload(generated_at, "snapshot_timeout", "Snapshot timed out")
 
-  def state_payload(:timeout, generated_at) do
-    error_payload(generated_at, "snapshot_timeout", "Snapshot timed out")
-  end
+      :unavailable ->
+        error_payload(generated_at, "snapshot_unavailable", "Snapshot unavailable")
 
-  def state_payload(:unavailable, generated_at) do
-    error_payload(generated_at, "snapshot_unavailable", "Snapshot unavailable")
-  end
-
-  def state_payload(:error, generated_at) do
-    error_payload(generated_at, "snapshot_unavailable", "Snapshot unavailable")
+      :error ->
+        error_payload(generated_at, "snapshot_unavailable", "Snapshot unavailable")
+    end
   end
 
   @spec state_payload_from_snapshot(map(), DateTime.t()) :: map()
@@ -44,14 +42,14 @@ defmodule SymphonyElixirWeb.Observability.Projection do
   end
 
   @spec issue_payload(String.t(), snapshot_result()) :: {:ok, map()} | {:error, :issue_not_found}
-  def issue_payload(issue_identifier, snapshot_result)
+  def issue_payload(issue_identifier, snapshot_result) when is_binary(issue_identifier) do
+    case snapshot_result do
+      {:ok, snapshot} ->
+        issue_payload_from_snapshot(issue_identifier, snapshot)
 
-  def issue_payload(issue_identifier, {:ok, snapshot}) when is_binary(issue_identifier) do
-    issue_payload_from_snapshot(issue_identifier, snapshot)
-  end
-
-  def issue_payload(issue_identifier, _snapshot_result) when is_binary(issue_identifier) do
-    {:error, :issue_not_found}
+      _other ->
+        {:error, :issue_not_found}
+    end
   end
 
   @spec issue_payload_from_snapshot(String.t(), map(), DateTime.t()) :: {:ok, map()} | {:error, :issue_not_found}

@@ -13,6 +13,7 @@ All commands assume the repository root unless noted otherwise.
   ./dev/temporal-k3s up
   ./dev/temporal-k3s status
   ./dev/temporal-k3s smoke
+  ./dev/temporal-k3s smoke --workflow-mode vanilla
   ./dev/temporal-k3s down
   ```
 
@@ -84,6 +85,8 @@ All commands assume the repository root unless noted otherwise.
 - Symphony control-plane logs: `log/symphony.log` unless `--logs-root` changed it.
 - Repo-managed worker logs: `.symphony/dev/temporal-k3s/logs/worker.log`.
 - Repo-managed smoke evidence: `.symphony/dev/projects/smoke-*/evidence/`.
+- Smoke summaries: `summary.txt`, plus `blocker-plane.txt` and `blocker.txt` on failures. These are
+  the fastest way to identify the failing plane before reading raw logs.
 - Live remote workspaces: `${SYMPHONY_K3S_PROJECT_ROOT:-$PWD/.symphony/dev/projects}/<project_id>/workspace/`.
 - Copied artifact bundles: `${SYMPHONY_K3S_PROJECT_ROOT:-$PWD/.symphony/dev/projects}/<project_id>/outputs/<run_id>/`.
 - Artifact metadata: `metadata.json` in the copied artifact bundle. It records `workflowId`, `runId`, `projectId`, `jobName`, `status`, `collectedArtifacts`, and any `cleanupError`.
@@ -94,6 +97,9 @@ All commands assume the repository root unless noted otherwise.
 - Successful remote attempts keep their artifact bundle only until final Org reconciliation and normal workspace cleanup complete. After cleanup, the remaining durable proof should be the recorded identifiers, state, and outcome metadata in Org plus the observability surfaces.
 - Failed remote attempts keep their evidence by default until the issue leaves active triage or an operator explicitly cleans it up.
 - `./dev/temporal-k3s smoke` always preserves a dedicated evidence directory and prints its path. Keep that directory until the failing plane is understood.
+- The default smoke lane is `workflow_mode=phased`. Capture one `./dev/temporal-k3s smoke` result
+  and one `./dev/temporal-k3s smoke --workflow-mode vanilla` result when validating the fallback
+  contract or triaging a phased-only regression.
 
 ## Subsystem Command Map
 
@@ -112,6 +118,9 @@ All commands assume the repository root unless noted otherwise.
   ```
 
 - Primary evidence: `log/symphony.log`, copied `.symphony/workpad.md`, copied `.symphony/run-result.json`.
+- Key remote lifecycle log events in `log/symphony.log`: `event=issue_dispatch`,
+  `event=remote_workflow_submission_*`, `event=remote_phase_*`, `event=remote_status_poll_*`,
+  `event=remote_artifact_sync_*`, and `event=remote_org_finalization_*`.
 - Repair before retry when the failure is `org_workpad_sync_failed`, `org_state_sync_failed`, or the issue cannot be read back from Org.
 
 ### Elixir Control Plane And Observability API

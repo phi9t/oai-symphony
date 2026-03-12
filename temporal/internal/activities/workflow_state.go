@@ -151,7 +151,9 @@ func normalizePhases(phases []PhaseState, state WorkflowState) []PhaseState {
 		}
 
 		phaseStatus := NormalizeWorkflowStatus(phase.Status)
-		if phaseStatus == "" {
+		if name == state.CurrentPhase && workflowStatusTerminal(state.Status) && !workflowStatusTerminal(phaseStatus) {
+			phaseStatus = state.Status
+		} else if phaseStatus == "" {
 			if name == state.CurrentPhase {
 				phaseStatus = state.Status
 			} else {
@@ -179,6 +181,15 @@ func normalizePhases(phases []PhaseState, state WorkflowState) []PhaseState {
 	}
 
 	return normalized
+}
+
+func workflowStatusTerminal(status string) bool {
+	switch NormalizeWorkflowStatus(status) {
+	case "succeeded", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func firstNonBlank(values ...string) string {

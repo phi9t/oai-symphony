@@ -38,8 +38,6 @@ defmodule SymphonyElixirWeb.Observability.Operator do
     |> normalize_timestamp(:completed_at)
   end
 
-  defp normalize_timestamps(payload), do: payload
-
   defp normalize_timestamp(payload, key) do
     Map.update(payload, key, nil, fn
       %DateTime{} = datetime ->

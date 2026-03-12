@@ -19,6 +19,18 @@ When logging Codex execution lifecycle events, include:
 
 - `session_id`: combined Codex thread/turn identifier.
 
+When logging remote Temporal/K3s lifecycle events, include when available:
+
+- `execution_backend`
+- `workflow_id`
+- `run_id`
+- `workflow_mode`
+- `current_phase`
+- `project_id`
+- `workspace_path`
+- `artifact_dir`
+- `job_name`
+
 ## Message Design
 
 - Use explicit `key=value` pairs in message text for high-signal fields.
@@ -31,6 +43,12 @@ When logging Codex execution lifecycle events, include:
 - `AgentRunner`: log start/completion/failure with issue context, plus `session_id` when known.
 - `Orchestrator`: log dispatch, retry, terminal/non-active transitions, and worker exits with issue context. Include `session_id` whenever running-entry data has it.
 - `Codex.AppServer`: log session start/completion/error with issue context and `session_id`.
+- `Execution.TemporalK3s`: use stable `event=...` messages for
+  `remote_workflow_submission_start|complete|failed`,
+  `remote_phase_started|completed|failed`,
+  `remote_status_poll_start|result|failed`,
+  `remote_artifact_sync_start|complete`, and
+  `remote_org_finalization_start|complete|failed`.
 
 ## Checklist For New Logs
 

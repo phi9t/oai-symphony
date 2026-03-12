@@ -40,13 +40,40 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     prompt = PromptBuilder.build_prompt(issue, Keyword.put(opts, :workpad, workpad))
     input = write_input_bundle!(issue, project, prompt, workpad)
     cli_opts = cli_opts(opts)
+    run_payload = temporal_run_payload(issue, project, input)
 
-    case TemporalCli.run(temporal_run_payload(issue, project, input), cli_opts) do
+    log_remote_event(
+      :info,
+      "remote_workflow_submission_start",
+      issue,
+      workflow_id: Map.get(run_payload, "workflowId"),
+      project_id: Map.get(run_payload, "projectId"),
+      workflow_mode: Map.get(run_payload, "workflowMode"),
+      workspace_path: get_in(run_payload, ["paths", "workspacePath"]),
+      artifact_dir: get_in(run_payload, ["paths", "outputsPath"])
+    )
+
+    case TemporalCli.run(run_payload, cli_opts) do
       {:ok, run} ->
+        run_state = seed_run_state(project, run)
+        log_remote_event(:info, "remote_workflow_submission_complete", issue, run_state_log_fields(run_state))
+        log_phase_started(issue, run_state)
         emit_session_started(codex_update_recipient, issue, project, run)
-        await_remote_completion(issue, project, run, cli_opts, codex_update_recipient)
+        await_remote_completion(issue, run_state, cli_opts, codex_update_recipient)
 
       {:error, reason} ->
+        log_remote_event(
+          :error,
+          "remote_workflow_submission_failed",
+          issue,
+          workflow_id: Map.get(run_payload, "workflowId"),
+          project_id: Map.get(run_payload, "projectId"),
+          workflow_mode: Map.get(run_payload, "workflowMode"),
+          workspace_path: get_in(run_payload, ["paths", "workspacePath"]),
+          artifact_dir: get_in(run_payload, ["paths", "outputsPath"]),
+          reason: inspect(reason)
+        )
+
         Logger.error("Temporal/K3s run failed for #{issue_context(issue)}: #{inspect(reason)}")
 
         raise RuntimeError,
@@ -247,14 +274,15 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     }
   end
 
-  defp await_remote_completion(issue, project, run, cli_opts, recipient) do
+  defp await_remote_completion(issue, run_state, cli_opts, recipient) do
     poll_ms = Config.temporal_status_poll_ms()
-    run_state = seed_run_state(project, run)
     do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms)
   end
 
   defp do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms) do
     Process.sleep(poll_ms)
+
+    log_remote_event(:info, "remote_status_poll_start", issue, run_state_log_fields(run_state))
 
     case TemporalCli.status(
            temporal_request_payload(run_state.workflow_id,
@@ -269,6 +297,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
           |> update_run_state(status)
           |> mark_status_check_success()
 
+        log_remote_event(:info, "remote_status_poll_result", issue, run_state_log_fields(updated_state))
+        maybe_log_phase_transition(issue, run_state, updated_state)
         emit_status_update(recipient, issue, updated_state, status)
 
         case normalized_workflow_status(status) do
@@ -288,6 +318,17 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       {:error, reason} ->
         elapsed_ms = status_failure_elapsed_ms(run_state)
         timeout_ms = Config.codex_stall_timeout_ms()
+
+        log_remote_event(
+          :warning,
+          "remote_status_poll_failed",
+          issue,
+          run_state_log_fields(run_state,
+            elapsed_ms: elapsed_ms,
+            timeout_ms: timeout_ms,
+            reason: inspect(reason)
+          )
+        )
 
         Logger.warning("Temporal/K3s status check failed for #{issue_context(issue)} elapsed_ms=#{elapsed_ms} timeout_ms=#{timeout_ms}: #{inspect(reason)}")
 
@@ -360,11 +401,71 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp sync_and_finalize!(issue, run_state, status) do
     workpad_path = Path.join(run_state.workspace_path, @symphony_dir <> "/" <> @workpad_file)
     result_path = Path.join(run_state.workspace_path, @symphony_dir <> "/" <> @result_file)
+
+    log_remote_event(
+      :info,
+      "remote_artifact_sync_start",
+      issue,
+      run_state_log_fields(run_state, workpad_path: workpad_path, result_path: result_path)
+    )
+
     workpad = read_optional_file(workpad_path)
     run_result = read_optional_json(result_path)
+    target_state = if(is_map(run_result), do: target_state_from_run_result(run_result), else: nil)
 
-    maybe_replace_org_workpad(issue, workpad)
-    maybe_apply_run_result_state(issue, run_result)
+    log_remote_event(
+      :info,
+      "remote_artifact_sync_complete",
+      issue,
+      run_state_log_fields(run_state,
+        workpad_path: workpad_path,
+        result_path: result_path,
+        workpad_present: is_binary(workpad),
+        run_result_present: is_map(run_result),
+        target_state: target_state
+      )
+    )
+
+    log_remote_event(
+      :info,
+      "remote_org_finalization_start",
+      issue,
+      run_state_log_fields(run_state,
+        target_state: target_state,
+        tracker_kind: Config.tracker_kind()
+      )
+    )
+
+    try do
+      maybe_replace_org_workpad(issue, workpad)
+      maybe_apply_run_result_state(issue, run_result)
+
+      log_remote_event(
+        :info,
+        "remote_org_finalization_complete",
+        issue,
+        run_state_log_fields(run_state,
+          target_state: target_state,
+          tracker_kind: Config.tracker_kind(),
+          workpad_synced: is_binary(workpad) and Config.tracker_kind() == "orgmode",
+          run_result_present: is_map(run_result)
+        )
+      )
+    rescue
+      error ->
+        log_remote_event(
+          :error,
+          "remote_org_finalization_failed",
+          issue,
+          run_state_log_fields(run_state,
+            target_state: target_state,
+            tracker_kind: Config.tracker_kind(),
+            reason: Exception.message(error)
+          )
+        )
+
+        reraise(error, __STACKTRACE__)
+    end
 
     case {normalized_workflow_status(status), run_result} do
       {status_name, %{} = result} when status_name in ["succeeded", "failed", "cancelled"] ->
@@ -630,6 +731,73 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp maybe_put_workflow_mode(payload, _workflow_mode), do: payload
+
+  defp maybe_log_phase_transition(issue, previous_state, next_state) do
+    cond do
+      phase_start?(previous_state, next_state) ->
+        log_phase_started(issue, next_state)
+
+      next_state.status == "succeeded" ->
+        log_remote_event(:info, "remote_phase_completed", issue, run_state_log_fields(next_state))
+
+      next_state.status in ["failed", "cancelled"] ->
+        log_remote_event(:warning, "remote_phase_failed", issue, run_state_log_fields(next_state))
+
+      true ->
+        :ok
+    end
+  end
+
+  defp phase_start?(previous_state, next_state) do
+    next_state.status in ["queued", "pending", "running"] and
+      (previous_state.current_phase != next_state.current_phase or previous_state.status not in ["queued", "pending", "running"])
+  end
+
+  defp log_phase_started(issue, run_state) do
+    log_remote_event(:info, "remote_phase_started", issue, run_state_log_fields(run_state))
+  end
+
+  defp run_state_log_fields(run_state, extra_fields \\ []) do
+    [
+      workflow_id: Map.get(run_state, :workflow_id),
+      run_id: Map.get(run_state, :run_id),
+      workflow_mode: Map.get(run_state, :workflow_mode),
+      current_phase: Map.get(run_state, :current_phase),
+      status: Map.get(run_state, :status),
+      project_id: Map.get(run_state, :project_id),
+      workspace_path: Map.get(run_state, :workspace_path),
+      artifact_dir: Map.get(run_state, :artifact_dir),
+      job_name: Map.get(run_state, :job_name)
+    ] ++ extra_fields
+  end
+
+  defp log_remote_event(level, event, %Issue{} = issue, fields) when is_list(fields) do
+    message =
+      [
+        event: event,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier
+      ]
+      |> Kernel.++(fields)
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Enum.map_join(" ", fn {key, value} -> "#{key}=#{format_log_value(value)}" end)
+
+    case level do
+      :error -> Logger.error(message)
+      :warning -> Logger.warning(message)
+      :info -> Logger.info(message)
+    end
+  end
+
+  defp format_log_value(value) when is_binary(value) do
+    if String.contains?(value, [" ", "\t", "\n"]) do
+      inspect(value)
+    else
+      value
+    end
+  end
+
+  defp format_log_value(value), do: inspect(value)
 
   defp session_id(run) do
     workflow_id = Map.get(run, "workflowId") || "issue/unknown"
