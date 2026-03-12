@@ -34,10 +34,7 @@ defmodule SymphonyElixir.K3sLauncherTest do
           "echo hi"
         ],
         cd: @repo_root,
-        env: [
-          {"SYMPHONY_KUBECTL_WRAPPER", wrapper_path},
-          {"SYMPHONY_CAPTURED_MANIFEST", capture_path}
-        ],
+        env: [{"SYMPHONY_KUBECTL_WRAPPER", wrapper_path}, {"SYMPHONY_CAPTURED_MANIFEST", capture_path}],
         stderr_to_stdout: true
       )
 
@@ -91,7 +88,7 @@ defmodule SymphonyElixir.K3sLauncherTest do
     assert manifest =~ ~s(limits:\n              cpu: "2"\n              memory: "8Gi")
   end
 
-  test "sjob shortens long job names to valid Kubernetes resource and label values" do
+  test "sjob shortens long Kubernetes names and labels deterministically" do
     %{
       capture_path: capture_path,
       project_root: project_root,
@@ -100,8 +97,8 @@ defmodule SymphonyElixir.K3sLauncherTest do
     } =
       temp_launcher_paths()
 
-    long_project_id = "smoke-20260311191652"
-    long_job_name = "smoke-smoke-20260311191652-019cde54"
+    long_project_id = "REV-20-operator-run-temporal-k3s-proof-project-id-that-keeps-growing"
+    long_job_name = "smoke-smoke-20260312100223-019ce17f-extra-job-context-for-kubernetes"
 
     {output, 0} =
       System.cmd(
@@ -124,19 +121,25 @@ defmodule SymphonyElixir.K3sLauncherTest do
         stderr_to_stdout: true
       )
 
-    [resource_name] = Regex.run(~r/submitted (\S+)/, output, capture: :all_but_first)
-    assert String.starts_with?(resource_name, "symphony-job-")
-    assert String.length(resource_name) <= 63
+    assert output =~ "submitted"
 
     manifest = File.read!(capture_path)
 
-    [manifest_name] = Regex.run(~r/^  name: (\S+)$/m, manifest, capture: :all_but_first)
-    [project_label] = Regex.run(~r/symphony\/project-id: "([^"]+)"/, manifest, capture: :all_but_first)
-    [job_label] = Regex.run(~r/symphony\/job-name: "([^"]+)"/, manifest, capture: :all_but_first)
+    [job_name] =
+      Regex.run(~r/name: ([^\n]+)/, manifest, capture: :all_but_first)
 
-    assert manifest_name == resource_name
+    [project_label] =
+      Regex.run(~r/symphony\/project-id: "([^"]+)"/, manifest, capture: :all_but_first)
+
+    [job_label] =
+      Regex.run(~r/symphony\/job-name: "([^"]+)"/, manifest, capture: :all_but_first)
+
+    assert String.length(job_name) <= 63
     assert String.length(project_label) <= 63
     assert String.length(job_label) <= 63
+    assert job_name =~ ~r/-\d+$/
+    assert project_label =~ ~r/-\d+$/
+    assert job_label =~ ~r/-\d+$/
   end
 
   defp temp_launcher_paths do

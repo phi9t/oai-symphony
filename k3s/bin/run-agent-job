@@ -14,6 +14,18 @@ mkdir -p "$(dirname "${WORKPAD_PATH}")"
 mkdir -p "$(dirname "${RESULT_PATH}")"
 mkdir -p "${WORKSPACE_PATH}"
 
+PROMPT_CONTENT="$(cat "${PROMPT_PATH}")"
+WORKPAD_CONTENT=""
+ISSUE_CONTENT=""
+
+if [[ -f "${WORKPAD_PATH}" ]]; then
+    WORKPAD_CONTENT="$(cat "${WORKPAD_PATH}")"
+fi
+
+if [[ -n "${ISSUE_PATH:-}" && -f "${ISSUE_PATH}" ]]; then
+    ISSUE_CONTENT="$(cat "${ISSUE_PATH}")"
+fi
+
 git config --global --add safe.directory "${WORKSPACE_PATH}" >/dev/null 2>&1 || true
 
 if [[ -d "${REPOSITORY_ORIGIN_URL}" ]]; then
@@ -39,7 +51,12 @@ else
     git -C "${WORKSPACE_PATH}" fetch origin "${REPOSITORY_DEFAULT_BRANCH}" --depth 1 || true
 fi
 
-if [[ ! -f "${WORKPAD_PATH}" ]]; then
+mkdir -p "$(dirname "${PROMPT_PATH}")"
+printf '%s' "${PROMPT_CONTENT}" > "${PROMPT_PATH}"
+
+if [[ -n "${WORKPAD_CONTENT}" ]]; then
+    printf '%s' "${WORKPAD_CONTENT}" > "${WORKPAD_PATH}"
+elif [[ ! -f "${WORKPAD_PATH}" ]]; then
     cat > "${WORKPAD_PATH}" <<'EOF'
 ### Environment
 `<host>:<abs-workdir>@<unknown-sha>`
@@ -58,9 +75,12 @@ if [[ ! -f "${WORKPAD_PATH}" ]]; then
 EOF
 fi
 
+if [[ -n "${ISSUE_CONTENT}" && -n "${ISSUE_PATH:-}" ]]; then
+    printf '%s' "${ISSUE_CONTENT}" > "${ISSUE_PATH}"
+fi
+
 cd "${WORKSPACE_PATH}"
 
-PROMPT_CONTENT="$(cat "${PROMPT_PATH}")"
 export PROMPT_CONTENT
 
 set +e

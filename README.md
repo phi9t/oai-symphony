@@ -85,6 +85,19 @@ The repository now also ships a repo-owned Temporal/K3s developer stack for the 
 ./dev/temporal-k3s down
 ```
 
+`./dev/temporal-k3s smoke` is the minimum operator-run proof for the repo-managed remote runtime:
+it verifies the named Temporal container, K3s control plane, worker, namespace, workflow
+submission, K3s job execution, and smoke-artifact reconciliation as one end-to-end path. When a
+plane is broken, `status` and `smoke` now emit a specific blocker and preserve evidence under
+`.symphony/dev/projects/smoke-*/evidence/` instead of collapsing to a generic smoke failure.
+The repo-managed Temporal stack also defaults to `127.0.0.1:17233` so it does not alias an
+unrelated local Temporal server on `7233`.
+
+Repeated automation should stay on self-hosted Docker-capable runners only. Until a real
+`symphony/agent:latest` image exists, the repo-owned queue workflow to promote next is
+`./.symphony/temporal-self-land-workflow.md`, which reads `SYMPHONY_K3S_IMAGE`, while
+`./dev/temporal-k3s smoke` remains the trusted operator-run baseline.
+
 The remote K3s workflow also supports optional `k3s.default_gpu_count` and `k3s.runtime_class`
 settings for GPU-backed jobs without changing CPU-only manifests.
 

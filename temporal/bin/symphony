@@ -13,5 +13,11 @@ export TMPDIR="${TMPDIR:-${GOTMPDIR}}"
 mkdir -p "${GOCACHE}"
 mkdir -p "${GOTMPDIR}"
 
+export GOCACHE="${GOCACHE:-${REPO_ROOT}/.symphony/dev/go-build}"
+export GOTMPDIR="${GOTMPDIR:-${REPO_ROOT}/.symphony/dev/go-tmp}"
+export TMPDIR="${TMPDIR:-${GOTMPDIR}}"
+mkdir -p "${GOCACHE}"
+mkdir -p "${GOTMPDIR}"
+
 cd "${REPO_ROOT}/temporal"
 exec go run ./cmd/symphony "$@"
