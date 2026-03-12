@@ -32,6 +32,12 @@ Tests use ExUnit and live under `elixir/test/` with filenames ending in `_test.e
 
 The project sets a 100% coverage summary threshold in `elixir/mix.exs`, so add or update tests with every behavioral change. Prefer targeted runs while iterating, then finish with `make -C elixir all`.
 
+## RFC Proposals
+
+Use the RFC process for major architecture, runtime, workflow, or process changes. Create one proposal per file under `docs/rfcs/`, following [`docs/rfcs/0000-template.md`](/mnt/data_infra/workspace/symphony/docs/rfcs/0000-template.md) and the workflow in [`docs/rfcs/README.md`](/mnt/data_infra/workspace/symphony/docs/rfcs/README.md).
+
+Accepted RFCs should be converted into Org tasks only after review votes are recorded. When task boundaries are clear, create tasks directly; otherwise keep the RFC in review and draft tasks later.
+
 ## Commit & Pull Request Guidelines
 
 Recent commits use short, imperative subjects, sometimes with a PR reference, for example `Move Elixir observability dashboard to Phoenix (#29)`. Keep commits narrowly scoped and avoid unrelated refactors.

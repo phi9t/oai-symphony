@@ -173,9 +173,10 @@ Notes:
   execution, K3s job completion, artifact creation, and retained evidence together.
 - Real agent runs still need `k3s.image` to point at an image that contains `bash`, `git`, and a
   working implementation of your configured `codex.command`.
-- The equivalent repo-owned workflow to promote next is `./.symphony/fork-self-land-workflow.md`,
-  but repeated automation should wait for a real `symphony/agent:latest` image and a self-hosted
-  Docker/K3s runner instead of assuming GitHub-hosted runners can carry this stack.
+- The equivalent repo-owned workflow to promote next is `./.symphony/temporal-self-land-workflow.md`.
+  It reads `SYMPHONY_K3S_IMAGE`, and repeated automation should wait for a real
+  `symphony/agent:latest` image plus a self-hosted Docker/K3s runner instead of assuming
+  GitHub-hosted runners can carry this stack.
 - The default Temporal helper command is now `./temporal/bin/symphony`, which works correctly from
   the repository root.
 

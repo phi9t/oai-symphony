@@ -926,7 +926,15 @@ EOF
         smoke_blocker "workflow submission returned unexpected status ${run_status:-<empty>}"
 
     cat > "${status_input_path}" <<EOF
-{"workflowId":"${SMOKE_WORKFLOW_ID}","runId":"${SMOKE_RUN_ID}","temporal":{"address":"${active_temporal_address}","namespace":"${TEMPORAL_NAMESPACE}"}}
+{
+  "workflowId": "${SMOKE_WORKFLOW_ID}",
+  "runId": "${SMOKE_RUN_ID}",
+  "temporal": {
+    "address": "${active_temporal_address}",
+    "namespace": "${TEMPORAL_NAMESPACE}",
+    "taskQueue": "${TEMPORAL_TASK_QUEUE}"
+  }
+}
 EOF
 
     local deadline=$((SECONDS + SMOKE_TIMEOUT_SECONDS))
@@ -936,6 +944,10 @@ EOF
     while ((SECONDS < deadline)); do
         if ! status_output="$("${REPO_ROOT}/temporal/bin/symphony" status --input "${status_input_path}" --output json 2> "${status_stderr_path}")"; then
             printf '%s\n' "${status_output}" >> "${SMOKE_EVIDENCE_PATH}/status-errors.txt"
+            if grep -q "workflow not found" "${status_stderr_path}" 2>/dev/null; then
+                sleep 3
+                continue
+            fi
             smoke_blocker "$(classify_temporal_command_error "status polling" "$(cat "${status_stderr_path}" 2>/dev/null; printf '%s\n' "${status_output}")")"
         fi
 
@@ -963,6 +975,14 @@ EOF
     if ((SECONDS >= deadline)); then
         smoke_blocker "$(classify_smoke_timeout "${workflow_status}")"
     fi
+
+    local artifact_deadline=$((SECONDS + 15))
+    while ((SECONDS < artifact_deadline)); do
+        if [[ -f "${SMOKE_RESULT_PATH}" ]] && grep -q "Smoke workflow completed" "${SMOKE_WORKPAD_PATH}" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
 
     if ! validation_error="$(validate_smoke_artifacts 2>&1)"; then
         smoke_blocker "invalid smoke artifacts: $(compact_output "${validation_error}")"

@@ -1,6 +1,8 @@
 ---
 # Repo-local Symphony workflows for this repository live under `../.symphony/`.
 # `local-bootstrap-workflow.md` is the supervised local path.
+# `temporal-self-land-workflow.md` is the preferred unattended path on hosts
+# where Temporal/K3s is available.
 # `fork-self-land-workflow.md` rewrites workspace remotes to
 # `git@github.com:phi9t/oai-symphony.git`, enables networked Codex turns
 # for GitHub operations, and requires `commit`, `push`, and `land`
@@ -74,7 +76,11 @@ codex:
 ---
 
 The configured `temporal.address` and `temporal.namespace` apply to helper `run`, `status`,
-`cancel`, and `describe` requests.
+`cancel`, `describe`, and readiness requests. Before each claim, Symphony now probes Temporal
+reachability, namespace availability, worker pollers, and the target K3s namespace so blocked
+runtimes surface before dispatch instead of failing silently afterward. The configured
+`hooks.before_remove` command also runs before remote Temporal/K3s project roots are deleted, so
+cleanup stays aligned with the local backend.
 
 You are working on an Org task `{{ issue.identifier }}`.
 
@@ -117,6 +123,9 @@ No workpad was synced from Org.
 5. The control plane will read `./.symphony/run-result.json` to decide the target Org state.
 6. If remote status checks exceed `codex.stall_timeout_ms` or the final Org sync fails, the control
    plane will fail the run instead of silently retrying forever or dropping the error.
+7. When observability is enabled, the control plane exposes the active remote workflow/run/job IDs,
+   artifact directory, last successful status poll, last Org sync result, and stable failure code
+   through the existing dashboard/API payloads.
 
 ## Required local artifacts
 
@@ -153,10 +162,29 @@ No workpad was synced from Org.
    - `Validation`
    - `Notes`
 3. Capture a concrete reproduction signal before implementing.
-4. Run the required validation before concluding the run.
-5. If blocked, record the blocker in both the workpad and `run-result.json`.
+4. For this repository's remote backend, treat [`../docs/operations/phase-1-remote-validation-matrix.md`](../docs/operations/phase-1-remote-validation-matrix.md) as the source of truth for gate classes, contract authority, owners, and pass evidence along the `Org -> Elixir -> Temporal -> K3s -> Org` path.
+5. Run the required validation before concluding the run.
+6. If blocked, record the blocker in both the workpad and `run-result.json`.
+
+## Planning conventions
+
+When a repo-specific workflow exposes `org_task` planning actions, use them intentionally:
+
+- Use `org_task.deep_dive` for structural analysis, architecture review, or failure investigation
+  that should stay on the current task.
+- Use `org_task.deep_revision` with `mode: "draft"` when the next work is still uncertain and
+  should be discussed before new tasks are created.
+- Use `org_task.deep_revision` with `mode: "create"` only for clear top-level follow-on tasks that
+  already have description, acceptance criteria, priority, and validation steps. Created tasks
+  should start with an empty `Codex Workpad`.
+- If the follow-on work is really a major architecture, runtime, or process proposal, write or
+  update an RFC in `docs/rfcs/` instead of creating implementation tasks immediately.
 
 ## `run-result.json` contract
+
+The remote Temporal worker validates this file and copies the `.symphony` artifact bundle into
+`outputs/<run-id>/` before it cleans up the finished K3s job, so malformed or missing data fail the
+runtime handoff instead of being silently ignored.
 
 - Successful ready-for-review run:
   - `targetState`: `Human Review`

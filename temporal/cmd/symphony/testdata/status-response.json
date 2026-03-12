@@ -1,0 +1,9 @@
+{
+  "workflowId": "issue/alpha",
+  "runId": "run-00123456",
+  "status": "running",
+  "readiness": {
+    "state": "pending",
+    "reason": "workflow-active"
+  }
+}

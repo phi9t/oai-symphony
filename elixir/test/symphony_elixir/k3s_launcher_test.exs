@@ -5,7 +5,12 @@ defmodule SymphonyElixir.K3sLauncherTest do
   @sjob_path Path.join(@repo_root, "k3s/bin/sjob")
 
   test "sjob renders runtime class and GPU resources when configured" do
-    %{capture_path: capture_path, project_root: project_root, shared_cache_root: shared_cache_root, wrapper_path: wrapper_path} =
+    %{
+      capture_path: capture_path,
+      project_root: project_root,
+      shared_cache_root: shared_cache_root,
+      wrapper_path: wrapper_path
+    } =
       temp_launcher_paths()
 
     {output, 0} =
@@ -44,7 +49,12 @@ defmodule SymphonyElixir.K3sLauncherTest do
   end
 
   test "cpu-only sjob manifests omit runtime class and GPU resources" do
-    %{capture_path: capture_path, project_root: project_root, shared_cache_root: shared_cache_root, wrapper_path: wrapper_path} =
+    %{
+      capture_path: capture_path,
+      project_root: project_root,
+      shared_cache_root: shared_cache_root,
+      wrapper_path: wrapper_path
+    } =
       temp_launcher_paths()
 
     {output, 0} =
@@ -79,7 +89,12 @@ defmodule SymphonyElixir.K3sLauncherTest do
   end
 
   test "sjob shortens long Kubernetes names and labels deterministically" do
-    %{capture_path: capture_path, project_root: project_root, shared_cache_root: shared_cache_root, wrapper_path: wrapper_path} =
+    %{
+      capture_path: capture_path,
+      project_root: project_root,
+      shared_cache_root: shared_cache_root,
+      wrapper_path: wrapper_path
+    } =
       temp_launcher_paths()
 
     long_project_id = "REV-20-operator-run-temporal-k3s-proof-project-id-that-keeps-growing"
