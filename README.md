@@ -90,6 +90,12 @@ it verifies the named Temporal container, K3s control plane, worker, namespace, 
 submission, K3s job execution, and smoke-artifact reconciliation as one end-to-end path. When a
 plane is broken, `status` and `smoke` now emit a specific blocker and preserve evidence under
 `.symphony/dev/projects/smoke-*/evidence/` instead of collapsing to a generic smoke failure.
+The phased lane is the default smoke path; run `./dev/temporal-k3s smoke --workflow-mode vanilla`
+to prove the required single-job fallback with the same evidence contract. The smoke evidence
+summary now records `workflow_mode`, `expected_phase`, `last_current_phase`, `last_workflow_status`,
+`last_job_status`, and `failure_plane`, so operators can identify whether the breakage is in stack
+bootstrap, Temporal, K3s, the visibility contract, or artifact reconciliation before opening raw
+logs.
 The repo-managed Temporal stack also defaults to `127.0.0.1:17233` so it does not alias an
 unrelated local Temporal server on `7233`.
 
@@ -104,6 +110,9 @@ settings for GPU-backed jobs without changing CPU-only manifests.
 Remote workflows now accept `temporal.workflow_mode: phased | vanilla`. `phased` is the shipped
 default and reports normalized phase-aware runtime state, while `vanilla` preserves the original
 single-agent remote job as a first-class fallback.
+When the remote backend is active, Symphony now also emits deterministic `event=...` lifecycle logs
+for issue dispatch, workflow submission, phase start/completion/failure, status polling, artifact
+sync, and final Org reconciliation.
 
 When the remote backend is configured with a non-default Temporal `address` or `namespace`, the
 helper now reuses that connection for workflow `run`, `status`, `cancel`, and `describe`

@@ -407,7 +407,10 @@ defmodule SymphonyElixir.TemporalK3sTest do
       end
     end
 
-    assert :ok = TemporalK3s.run(issue, self(), runner: runner)
+    log =
+      capture_log(fn ->
+        assert :ok = TemporalK3s.run(issue, self(), runner: runner)
+      end)
 
     assert_receive {:org_get_workpad_called, "issue-remote"}
 
@@ -451,6 +454,15 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert %{status_calls: 4, status_payloads: status_payloads} = Agent.get(runner_state, & &1)
     assert length(status_payloads) == 4
     assert Enum.all?(status_payloads, &temporal_connection_payload?/1)
+    assert_remote_log(log, "remote_workflow_submission_start", ["workflow_mode=phased", "workflow_id=issue/issue-remote"])
+    assert_remote_log(log, "remote_workflow_submission_complete", ["run_id=run-001", "current_phase=execute"])
+    assert_remote_log(log, "remote_phase_started", ["workflow_mode=phased", "current_phase=execute"])
+    assert_remote_log(log, "remote_status_poll_start", ["workflow_mode=phased", "current_phase=execute"])
+    assert_remote_log(log, "remote_status_poll_failed", ["reason=:temporary_unreachable", "workflow_mode=phased"])
+    assert_remote_log(log, "remote_status_poll_result", ["status=succeeded", "run_id=run-002"])
+    assert_remote_log(log, "remote_phase_completed", ["status=succeeded", "current_phase=execute"])
+    assert_remote_log(log, "remote_artifact_sync_complete", ["target_state=Done", "run_result_present=true"])
+    assert_remote_log(log, "remote_org_finalization_complete", ["target_state=Done", "tracker_kind=orgmode"])
     refute_receive {:codex_worker_update, "issue-remote", _}, 20
   end
 
@@ -618,6 +630,96 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
     assert_receive {:org_replace_workpad_called, "issue-remote-vanilla", ^final_workpad}
     assert_receive {:org_set_task_state_called, "issue-remote-vanilla", "Done"}
+  end
+
+  test "TemporalK3s logs remote phase failures when the workflow ends unsuccessfully" do
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-k3s-phase-failure-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+    on_exit(fn -> File.rm_rf(k3s_project_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_status_poll_ms: 1,
+      temporal_workflow_mode: "vanilla",
+      k3s_project_root: k3s_project_root
+    )
+
+    issue = %Issue{
+      id: "issue-remote-phase-failure",
+      identifier: "REV-26",
+      title: "Log the failing remote phase",
+      description: "Surface remote phase failures in structured logs",
+      state: "In Progress"
+    }
+
+    runner = fn _command, subcommand, payload ->
+      case subcommand do
+        "run" ->
+          {:ok,
+           Jason.encode!(
+             Map.merge(
+               %{
+                 "workflowId" => "issue/issue-remote-phase-failure",
+                 "runId" => "run-failed-001",
+                 "status" => "queued",
+                 "projectId" => Map.get(payload, "projectId"),
+                 "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+                 "artifactDir" => get_in(payload, ["paths", "outputsPath"]),
+                 "jobName" => "symphony-job-issue-remote-phase-failure"
+               },
+               normalized_remote_phase_payload(
+                 "vanilla",
+                 "run",
+                 "queued",
+                 "symphony-job-issue-remote-phase-failure",
+                 get_in(payload, ["paths", "outputsPath"]),
+                 get_in(payload, ["paths", "workspacePath"])
+               )
+             )
+           )}
+
+        "status" ->
+          {:ok,
+           Jason.encode!(
+             Map.merge(
+               %{
+                 "workflowId" => "issue/issue-remote-phase-failure",
+                 "runId" => "run-failed-001",
+                 "status" => "failed",
+                 "projectId" => Map.get(payload, "projectId"),
+                 "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+                 "artifactDir" => get_in(payload, ["paths", "artifactDir"]) || get_in(payload, ["paths", "outputsPath"]),
+                 "jobName" => "symphony-job-issue-remote-phase-failure"
+               },
+               normalized_remote_phase_payload(
+                 "vanilla",
+                 "run",
+                 "failed",
+                 "symphony-job-issue-remote-phase-failure",
+                 get_in(payload, ["paths", "artifactDir"]) || get_in(payload, ["paths", "outputsPath"]),
+                 get_in(payload, ["paths", "workspacePath"])
+               )
+             )
+           )}
+      end
+    end
+
+    log =
+      capture_log(fn ->
+        assert_raise RuntimeError, ~r/Temporal\/K3s workflow ended with status=failed/, fn ->
+          TemporalK3s.run(issue, self(), runner: runner)
+        end
+      end)
+
+    assert_remote_log(log, "remote_phase_failed", ["workflow_mode=vanilla", "current_phase=run", "status=failed"])
   end
 
   test "TemporalK3s raises once repeated status failures exceed the stall timeout budget" do
@@ -1083,6 +1185,9 @@ defmodule SymphonyElixir.TemporalK3sTest do
           assert second_run["workspacePath"] != first_run["workspacePath"]
         end)
 
+      assert log =~ "event=issue_dispatch issue_id=issue-remote-orchestrated-retry"
+      assert log =~ "execution_backend=temporal_k3s"
+      assert log =~ "workflow_mode=phased"
       assert log =~ "scheduling retry"
     end)
   end
@@ -2042,6 +2147,14 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
   defp assert_temporal_connection_payload(payload) do
     assert temporal_connection_payload?(payload)
+  end
+
+  defp assert_remote_log(log, event, expected_fragments) when is_list(expected_fragments) do
+    assert log =~ "event=#{event}"
+
+    Enum.each(expected_fragments, fn fragment ->
+      assert log =~ fragment
+    end)
   end
 
   defp orchestrated_retry_run_events(trace_path) do

@@ -606,6 +606,108 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :unavailable} = Operator.refresh_payload(Module.concat(__MODULE__, :MissingOperatorOrchestrator))
   end
 
+  test "observability projection and facade cover unavailable and delegated branches" do
+    now = ~U[2026-03-12 11:00:00Z]
+    orchestrator_name = Module.concat(__MODULE__, :ObservabilityFacadeOrchestrator)
+    slow_orchestrator = Module.concat(__MODULE__, :ObservabilitySlowOrchestrator)
+    retry_fallback_orchestrator = Module.concat(__MODULE__, :ObservabilityRetryFallbackOrchestrator)
+    fallback_orchestrator = Module.concat(__MODULE__, :ObservabilityFallbackOperatorOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{queued: true, requested_at: now},
+        retry: %{queued: true, issue_identifier: "MT-HTTP", requested_at: now},
+        cleanup: %{completed: true, issue_identifier: "MT-HTTP", completed_at: now}
+      )
+
+    {:ok, _pid} =
+      SlowOrchestrator.start_link(name: slow_orchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: retry_fallback_orchestrator,
+        snapshot: static_snapshot(),
+        refresh: :unavailable,
+        retry: :issue_not_found,
+        cleanup: :unavailable
+      )
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: fallback_orchestrator,
+        snapshot: static_snapshot(),
+        refresh: %{requested_at: "already-normalized"},
+        retry: %{queued: true, issue_identifier: "MT-HTTP", requested_at: "already-normalized"},
+        cleanup: %{completed_at: "already-normalized"}
+      )
+
+    assert Projection.state_payload(:timeout, now) == %{
+             generated_at: "2026-03-12T11:00:00Z",
+             error: %{code: "snapshot_timeout", message: "Snapshot timed out"}
+           }
+
+    assert Projection.state_payload(:unavailable, now) == %{
+             generated_at: "2026-03-12T11:00:00Z",
+             error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}
+           }
+
+    assert Projection.state_payload(:error, now) == %{
+             generated_at: "2026-03-12T11:00:00Z",
+             error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}
+           }
+
+    assert match?(%{counts: %{running: 1, retrying: 1}}, Projection.state_payload_from_snapshot(static_snapshot()))
+    assert {:error, :issue_not_found} = Projection.issue_payload("MT-HTTP", :unavailable)
+
+    assert %{counts: %{running: 1, retrying: 1}} =
+             SymphonyElixirWeb.Observability.state_payload(orchestrator_name, 50)
+
+    assert %{counts: %{running: 1, retrying: 1}} =
+             SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
+
+    assert {:ok, %{issue_identifier: "MT-HTTP"}} =
+             SymphonyElixirWeb.Observability.issue_payload("MT-HTTP", orchestrator_name, 50)
+
+    assert {:error, :issue_not_found} =
+             SymphonyElixirWeb.Observability.issue_payload("MT-MISSING", orchestrator_name, 50)
+
+    assert {:error, :issue_not_found} =
+             SymphonyElixirWeb.Presenter.issue_payload("MT-MISSING", orchestrator_name, 50)
+
+    assert %{error: %{code: "snapshot_timeout", message: "Snapshot timed out"}} =
+             SymphonyElixirWeb.Observability.state_payload(slow_orchestrator, 1)
+
+    assert %{error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}} =
+             SymphonyElixirWeb.Observability.state_payload(
+               Module.concat(__MODULE__, :MissingObservabilityOrchestrator),
+               50
+             )
+
+    assert {:ok, %{queued: true, requested_at: "2026-03-12T11:00:00Z"}} =
+             SymphonyElixirWeb.Presenter.refresh_payload(orchestrator_name)
+
+    assert {:ok, %{queued: true, issue_identifier: "MT-HTTP", requested_at: "2026-03-12T11:00:00Z"}} =
+             SymphonyElixirWeb.Presenter.retry_payload(orchestrator_name, "MT-HTTP")
+
+    assert {:ok, %{completed: true, issue_identifier: "MT-HTTP", completed_at: "2026-03-12T11:00:00Z"}} =
+             SymphonyElixirWeb.Presenter.cleanup_payload(orchestrator_name, "MT-HTTP")
+
+    assert {:error, :invalid_issue_identifier} = Operator.cleanup_payload(orchestrator_name, "   ")
+    assert {:error, :issue_not_found} = Operator.retry_payload(retry_fallback_orchestrator, "MT-HTTP")
+    assert {:error, :unavailable} = Operator.retry_payload(Module.concat(__MODULE__, :MissingRetryOrchestrator), "MT-HTTP")
+    assert {:error, :unavailable} = Operator.cleanup_payload(Module.concat(__MODULE__, :MissingCleanupOrchestrator), "MT-HTTP")
+    assert {:ok, %{requested_at: "already-normalized"}} = Operator.refresh_payload(fallback_orchestrator)
+
+    assert {:ok, %{queued: true, issue_identifier: "MT-HTTP", requested_at: "already-normalized"}} =
+             Operator.retry_payload(fallback_orchestrator, "MT-HTTP")
+
+    assert {:ok, %{completed_at: "already-normalized"}} = Operator.cleanup_payload(fallback_orchestrator, "MT-HTTP")
+    assert {:error, :invalid_issue_identifier} = SymphonyElixirWeb.Presenter.cleanup_payload(orchestrator_name, "   ")
+    assert {:error, :unavailable} = SymphonyElixirWeb.Presenter.refresh_payload(Module.concat(__MODULE__, :MissingFacadeOrchestrator))
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)

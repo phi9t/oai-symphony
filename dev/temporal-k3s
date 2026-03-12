@@ -12,7 +12,9 @@ readonly EVIDENCE_ROOT="${STATE_ROOT}/evidence"
 readonly WORKER_PID_FILE="${STATE_ROOT}/worker.pid"
 readonly WORKER_LOG="${LOG_ROOT}/worker.log"
 readonly WORKER_META_FILE="${STATE_ROOT}/worker.env"
-readonly KUBECTL_WRAPPER="${REPO_ROOT}/k3s/bin/docker-kubectl"
+readonly KUBECTL_WRAPPER="${SYMPHONY_KUBECTL_WRAPPER:-${REPO_ROOT}/k3s/bin/docker-kubectl}"
+readonly TEMPORAL_HELPER_BIN="${SYMPHONY_TEMPORAL_HELPER_BIN:-${REPO_ROOT}/temporal/bin/symphony}"
+readonly SJOB_BIN="${SYMPHONY_SJOB_BIN:-${REPO_ROOT}/k3s/bin/sjob}"
 DOCKER_CONFIG="${SYMPHONY_DOCKER_CONFIG:-${STATE_ROOT}/docker-config}"
 BUILDX_CONFIG="${SYMPHONY_DOCKER_BUILDX_CONFIG:-${STATE_ROOT}/docker-buildx}"
 export DOCKER_CONFIG BUILDX_CONFIG
@@ -22,6 +24,7 @@ K3S_CONTAINER_NAME="${SYMPHONY_K3S_CONTAINER_NAME:-symphony-k3s-dev}"
 PROJECT_ROOT="${SYMPHONY_K3S_PROJECT_ROOT:-${REPO_ROOT}/.symphony/dev/projects}"
 SHARED_CACHE_ROOT="${SYMPHONY_K3S_SHARED_CACHE_ROOT:-${REPO_ROOT}/.symphony/dev/shared-cache}"
 SMOKE_IMAGE="${SYMPHONY_SMOKE_IMAGE:-symphony/smoke-agent:dev}"
+SMOKE_WORKFLOW_MODE="${SYMPHONY_SMOKE_WORKFLOW_MODE:-phased}"
 TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:17233}"
 TEMPORAL_NAMESPACE="${TEMPORAL_NAMESPACE:-default}"
 TEMPORAL_TASK_QUEUE="${TEMPORAL_TASK_QUEUE:-symphony}"
@@ -43,13 +46,21 @@ SMOKE_RESULT_PATH=""
 SMOKE_WORKFLOW_ID=""
 SMOKE_RUN_ID=""
 SMOKE_JOB_NAME=""
+SMOKE_SOURCE_REPO_HOST_PATH=""
+SMOKE_SOURCE_REPO_CONTAINER_PATH=""
+SMOKE_EXPECTED_PHASE=""
+SMOKE_LAST_CURRENT_PHASE=""
+SMOKE_LAST_WORKFLOW_STATUS=""
+SMOKE_LAST_JOB_STATUS=""
+SMOKE_FAILURE_PLANE=""
+SMOKE_FAILURE_REASON=""
 
 usage() {
     cat <<'EOF'
 Usage:
   ./dev/temporal-k3s up
   ./dev/temporal-k3s status
-  ./dev/temporal-k3s smoke
+  ./dev/temporal-k3s smoke [--workflow-mode phased|vanilla]
   ./dev/temporal-k3s down
   ./dev/temporal-k3s env
 EOF
@@ -84,12 +95,75 @@ container_running() {
     [[ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || echo false)" == "true" ]]
 }
 
+container_mount_matches() {
+    local container_name="$1"
+    local source_path="$2"
+    local destination_path="$3"
+    local mounts=""
+
+    mounts="$(docker inspect -f '{{range .Mounts}}{{printf "%s|%s\n" .Source .Destination}}{{end}}' "${container_name}" 2>/dev/null || true)"
+    printf '%s\n' "${mounts}" | grep -Fqx "${source_path}|${destination_path}"
+}
+
+k3s_container_matches_workspace() {
+    container_mount_matches "${K3S_CONTAINER_NAME}" "${REPO_ROOT}" "${REPO_ROOT}" &&
+        container_mount_matches "${K3S_CONTAINER_NAME}" "${PROJECT_ROOT}" "${PROJECT_ROOT}" &&
+        container_mount_matches "${K3S_CONTAINER_NAME}" "${SHARED_CACHE_ROOT}" "${SHARED_CACHE_ROOT}"
+}
+
 compact_output() {
     local value="$1"
     value="${value//$'\r'/ }"
     value="${value//$'\n'/ }"
     value="$(echo "${value}" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
     printf '%s' "${value}"
+}
+
+normalize_smoke_workflow_mode() {
+    local mode="$1"
+
+    case "$(printf '%s' "${mode}" | tr '[:upper:]' '[:lower:]' | xargs)" in
+        "" | phased)
+            printf 'phased\n'
+            ;;
+        vanilla)
+            printf 'vanilla\n'
+            ;;
+        *)
+            die "unsupported smoke workflow mode ${mode}; expected phased or vanilla"
+            ;;
+    esac
+}
+
+default_phase_for_workflow_mode() {
+    case "$1" in
+        vanilla)
+            printf 'run\n'
+            ;;
+        *)
+            printf 'execute\n'
+            ;;
+    esac
+}
+
+parse_smoke_args() {
+    SMOKE_WORKFLOW_MODE="$(normalize_smoke_workflow_mode "${SMOKE_WORKFLOW_MODE}")"
+
+    while (($# > 0)); do
+        case "$1" in
+            --workflow-mode)
+                shift
+                (($# > 0)) || die "--workflow-mode requires a value"
+                SMOKE_WORKFLOW_MODE="$(normalize_smoke_workflow_mode "$1")"
+                ;;
+            *)
+                die "unknown smoke option: $1"
+                ;;
+        esac
+        shift || true
+    done
+
+    SMOKE_EXPECTED_PHASE="$(default_phase_for_workflow_mode "${SMOKE_WORKFLOW_MODE}")"
 }
 
 configured_temporal_host() {
@@ -344,8 +418,15 @@ start_k3s_container() {
     local start_output=""
 
     if container_running "${K3S_CONTAINER_NAME}"; then
-        log "K3s container already running: ${K3S_CONTAINER_NAME}"
-    else
+        if k3s_container_matches_workspace; then
+            log "K3s container already running: ${K3S_CONTAINER_NAME}"
+        else
+            log "Recreating K3s container ${K3S_CONTAINER_NAME} because mounted workspace paths do not match ${REPO_ROOT}"
+            docker rm -f "${K3S_CONTAINER_NAME}" >/dev/null
+        fi
+    fi
+
+    if ! container_running "${K3S_CONTAINER_NAME}"; then
         if container_exists "${K3S_CONTAINER_NAME}"; then
             docker rm -f "${K3S_CONTAINER_NAME}" >/dev/null
         fi
@@ -640,14 +721,16 @@ smoke_job_status() {
     if job_output="$(
         SYMPHONY_KUBECTL_WRAPPER="${KUBECTL_WRAPPER}" \
             SYMPHONY_K3S_CONTAINER_NAME="${K3S_CONTAINER_NAME}" \
-            "${REPO_ROOT}/k3s/bin/sjob" status --project-id "${SMOKE_ID}" --job "${SMOKE_JOB_NAME}" --namespace "${K3S_NAMESPACE}" --output json 2>&1
+            "${SJOB_BIN}" status --project-id "${SMOKE_ID}" --job "${SMOKE_JOB_NAME}" --namespace "${K3S_NAMESPACE}" --output json 2>&1
     )"; then
         printf '%s\n' "${job_output}" > "${SMOKE_EVIDENCE_PATH}/job-status.json"
         printf '%s\n' "${job_output}" > "${SMOKE_EVIDENCE_PATH}/job-status-latest.json"
         status="$(json_file_field "${SMOKE_EVIDENCE_PATH}/job-status.json" "status" 2>/dev/null || true)"
+        SMOKE_LAST_JOB_STATUS="${status:-unknown}"
         printf '%s' "${status:-unknown}"
     else
         printf '%s\n' "${job_output}" > "${SMOKE_EVIDENCE_PATH}/job-status-error.txt"
+        SMOKE_LAST_JOB_STATUS="error:$(compact_output "${job_output}")"
         printf 'error:%s' "$(compact_output "${job_output}")"
     fi
 }
@@ -664,6 +747,15 @@ outcome: ${outcome}
 workflow_id: ${SMOKE_WORKFLOW_ID}
 run_id: ${SMOKE_RUN_ID}
 job_name: ${SMOKE_JOB_NAME}
+workflow_mode: ${SMOKE_WORKFLOW_MODE}
+expected_phase: ${SMOKE_EXPECTED_PHASE}
+last_current_phase: ${SMOKE_LAST_CURRENT_PHASE}
+last_workflow_status: ${SMOKE_LAST_WORKFLOW_STATUS}
+last_job_status: ${SMOKE_LAST_JOB_STATUS}
+source_repo_host_path: ${SMOKE_SOURCE_REPO_HOST_PATH}
+source_repo_container_path: ${SMOKE_SOURCE_REPO_CONTAINER_PATH}
+failure_plane: ${SMOKE_FAILURE_PLANE}
+failure_reason: ${SMOKE_FAILURE_REASON}
 temporal_address: $(effective_temporal_address)
 temporal_namespace: ${TEMPORAL_NAMESPACE}
 temporal_task_queue: ${TEMPORAL_TASK_QUEUE}
@@ -708,19 +800,67 @@ EOF
 }
 
 smoke_blocker() {
-    local message="$1"
+    local plane="$1"
+    local message="$2"
 
+    SMOKE_FAILURE_PLANE="${plane}"
+    SMOKE_FAILURE_REASON="${message}"
     capture_smoke_evidence "failed"
+    printf '%s\n' "${plane}" > "${SMOKE_EVIDENCE_PATH}/blocker-plane.txt"
     printf '%s\n' "${message}" > "${SMOKE_EVIDENCE_PATH}/blocker.txt"
     die "${message}. Evidence: ${SMOKE_EVIDENCE_PATH}"
 }
 
+prepare_smoke_source_repo() {
+    local clone_output=""
+
+    SMOKE_SOURCE_REPO_HOST_PATH="${SHARED_CACHE_ROOT}/${SMOKE_ID}-source.git"
+    SMOKE_SOURCE_REPO_CONTAINER_PATH="/cache/$(basename "${SMOKE_SOURCE_REPO_HOST_PATH}")"
+
+    rm -rf "${SMOKE_SOURCE_REPO_HOST_PATH}"
+    clone_output="$(git clone --mirror --no-hardlinks "${REPO_ROOT}" "${SMOKE_SOURCE_REPO_HOST_PATH}" 2>&1)" ||
+        smoke_blocker "source_repo" "unable to prepare smoke source repo mirror: $(compact_output "${clone_output}")"
+}
+
 validate_smoke_artifacts() {
-    python3 - "${SMOKE_RESULT_PATH}" "${SMOKE_WORKPAD_PATH}" <<'PY'
+    local result_path="${1:-${SMOKE_RESULT_PATH}}"
+    local workpad_path="${2:-${SMOKE_WORKPAD_PATH}}"
+    local run_response_path="${3:-${SMOKE_EVIDENCE_PATH}/run-response.json}"
+    local status_history_path="${4:-${SMOKE_EVIDENCE_PATH}/status-history.jsonl}"
+    local expected_workflow_mode="${5:-${SMOKE_WORKFLOW_MODE}}"
+    local expected_phase="${6:-${SMOKE_EXPECTED_PHASE}}"
+
+    python3 - "${result_path}" "${workpad_path}" "${run_response_path}" "${status_history_path}" "${expected_workflow_mode}" "${expected_phase}" <<'PY'
 import json
 import sys
 
-result_path, workpad_path = sys.argv[1], sys.argv[2]
+result_path, workpad_path, run_response_path, status_history_path, expected_workflow_mode, expected_phase = sys.argv[1:7]
+
+
+def workflow_mode(payload):
+    value = payload.get("workflow_mode", payload.get("workflowMode"))
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"{payload!r} is missing workflow_mode")
+    return value.strip()
+
+
+def current_phase(payload):
+    value = payload.get("current_phase", payload.get("currentPhase"))
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"{payload!r} is missing current_phase")
+    return value.strip()
+
+
+def phase_entry(payload, expected_name):
+    phases = payload.get("phases")
+    if not isinstance(phases, list) or not phases:
+        raise SystemExit(f"{payload!r} is missing non-empty phases")
+
+    for entry in phases:
+        if isinstance(entry, dict) and entry.get("name") == expected_name:
+            return entry
+
+    raise SystemExit(f"{payload!r} did not include phase {expected_name!r}")
 
 try:
     with open(result_path, "r", encoding="utf-8") as handle:
@@ -746,6 +886,58 @@ if not isinstance(result.get("summary"), str) or not result["summary"].strip():
 validation = result.get("validation")
 if not isinstance(validation, list):
     raise SystemExit(f"{result_path} validation must be a JSON array")
+
+try:
+    with open(run_response_path, "r", encoding="utf-8") as handle:
+        run_response = json.load(handle)
+except FileNotFoundError:
+    raise SystemExit(f"missing {run_response_path}")
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"invalid JSON in {run_response_path}: {exc}")
+
+if workflow_mode(run_response) != expected_workflow_mode:
+    raise SystemExit(
+        f"{run_response_path} expected workflow_mode={expected_workflow_mode!r}, got {workflow_mode(run_response)!r}"
+    )
+
+if current_phase(run_response) != expected_phase:
+    raise SystemExit(f"{run_response_path} expected current_phase={expected_phase!r}, got {current_phase(run_response)!r}")
+
+run_phase = phase_entry(run_response, expected_phase)
+if run_phase.get("status") not in {"queued", "pending", "running", "succeeded"}:
+    raise SystemExit(f"{run_response_path} phase {expected_phase!r} reported unexpected status {run_phase.get('status')!r}")
+
+try:
+    with open(status_history_path, "r", encoding="utf-8") as handle:
+        status_history = [json.loads(line) for line in handle if line.strip()]
+except FileNotFoundError:
+    raise SystemExit(f"missing {status_history_path}")
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"invalid JSON in {status_history_path}: {exc}")
+
+if not status_history:
+    raise SystemExit(f"{status_history_path} is missing status history entries")
+
+for index, payload in enumerate(status_history):
+    if workflow_mode(payload) != expected_workflow_mode:
+        raise SystemExit(
+            f"{status_history_path} entry {index} expected workflow_mode={expected_workflow_mode!r}, got {workflow_mode(payload)!r}"
+        )
+
+    if current_phase(payload) != expected_phase:
+        raise SystemExit(
+            f"{status_history_path} entry {index} expected current_phase={expected_phase!r}, got {current_phase(payload)!r}"
+        )
+
+    phase = phase_entry(payload, expected_phase)
+    if phase.get("status") != payload.get("status"):
+        raise SystemExit(
+            f"{status_history_path} entry {index} phase status {phase.get('status')!r} did not match payload status {payload.get('status')!r}"
+        )
+
+final_status = status_history[-1].get("status")
+if final_status != "succeeded":
+    raise SystemExit(f"{status_history_path} expected final status 'succeeded', got {final_status!r}")
 
 try:
     with open(workpad_path, "r", encoding="utf-8") as handle:
@@ -785,6 +977,7 @@ classify_smoke_timeout() {
 }
 
 cmd_smoke() {
+    parse_smoke_args "$@"
     require_command docker
     require_command python3
     ensure_dirs
@@ -805,6 +998,15 @@ cmd_smoke() {
     local status_stderr_path=""
     local validation_error=""
     local workflow_status=""
+    local observed_workflow_mode=""
+    local observed_phase=""
+    local job_status=""
+
+    SMOKE_FAILURE_PLANE=""
+    SMOKE_FAILURE_REASON=""
+    SMOKE_LAST_CURRENT_PHASE=""
+    SMOKE_LAST_WORKFLOW_STATUS=""
+    SMOKE_LAST_JOB_STATUS=""
 
     SMOKE_ID="smoke-$(date +%Y%m%d%H%M%S)"
     SMOKE_PROJECT_ROOT="${PROJECT_ROOT}/${SMOKE_ID}"
@@ -817,9 +1019,10 @@ cmd_smoke() {
 
     local symphony_path="${SMOKE_WORKSPACE_PATH}/.symphony"
     mkdir -p "${symphony_path}" "${SMOKE_OUTPUTS_PATH}" "${SMOKE_EVIDENCE_PATH}"
+    prepare_smoke_source_repo
 
     if ! "${SCRIPT_PATH}" up > "${SMOKE_EVIDENCE_PATH}/up.log" 2>&1; then
-        smoke_blocker "stack bootstrap failed: $(compact_output "$(last_nonempty_line "${SMOKE_EVIDENCE_PATH}/up.log")")"
+        smoke_blocker "stack_bootstrap" "stack bootstrap failed: $(compact_output "$(last_nonempty_line "${SMOKE_EVIDENCE_PATH}/up.log")")"
     fi
 
     active_temporal_address="$(effective_temporal_address)"
@@ -865,12 +1068,13 @@ EOF
   "workflowId": "${SMOKE_WORKFLOW_ID}",
   "projectId": "${SMOKE_ID}",
   "repository": {
-    "originUrl": "/opt/symphony",
+    "originUrl": "${SMOKE_SOURCE_REPO_CONTAINER_PATH}",
     "defaultBranch": "main"
   },
   "codex": {
     "command": "python3 /opt/symphony/dev/smoke_codex.py"
   },
+  "workflowMode": "${SMOKE_WORKFLOW_MODE}",
   "temporal": {
     "address": "${active_temporal_address}",
     "namespace": "${TEMPORAL_NAMESPACE}",
@@ -905,30 +1109,39 @@ EOF
 }
 EOF
 
-    if ! run_output="$("${REPO_ROOT}/temporal/bin/symphony" run --input "${input_path}" --output json 2> "${run_stderr_path}")"; then
+    if ! run_output="$("${TEMPORAL_HELPER_BIN}" run --input "${input_path}" --output json 2> "${run_stderr_path}")"; then
         printf '%s\n' "${run_output}" > "${SMOKE_EVIDENCE_PATH}/run-error.txt"
-        smoke_blocker "$(classify_temporal_command_error "workflow submission" "$(cat "${run_stderr_path}" 2>/dev/null; printf '%s\n' "${run_output}")")"
+        smoke_blocker "temporal" "$(classify_temporal_command_error "workflow submission" "$(cat "${run_stderr_path}" 2>/dev/null; printf '%s\n' "${run_output}")")"
     fi
 
     printf '%s\n' "${run_output}" > "${run_output_path}"
     if ! extract_json_payload "${run_output_path}" > "${run_response_path}"; then
-        smoke_blocker "workflow submission did not return a JSON payload; see ${run_output_path} and ${run_stderr_path}"
+        smoke_blocker "temporal" "workflow submission did not return a JSON payload; see ${run_output_path} and ${run_stderr_path}"
     fi
     cat "${run_response_path}"
 
     SMOKE_RUN_ID="$(json_file_field "${run_response_path}" "runId" 2>/dev/null || true)"
     SMOKE_JOB_NAME="$(json_file_field "${run_response_path}" "jobName" 2>/dev/null || true)"
     run_status="$(json_file_field "${run_response_path}" "status" 2>/dev/null || true)"
+    observed_workflow_mode="$(json_file_field "${run_response_path}" "workflow_mode" 2>/dev/null || true)"
+    observed_phase="$(json_file_field "${run_response_path}" "current_phase" 2>/dev/null || true)"
+    SMOKE_LAST_WORKFLOW_STATUS="${run_status}"
+    SMOKE_LAST_CURRENT_PHASE="${observed_phase}"
 
-    [[ -n "${SMOKE_RUN_ID}" ]] || smoke_blocker "workflow submission returned an invalid runId"
-    [[ -n "${SMOKE_JOB_NAME}" ]] || smoke_blocker "workflow submission returned an invalid jobName"
+    [[ -n "${SMOKE_RUN_ID}" ]] || smoke_blocker "visibility_contract" "workflow submission returned an invalid runId"
+    [[ -n "${SMOKE_JOB_NAME}" ]] || smoke_blocker "visibility_contract" "workflow submission returned an invalid jobName"
     [[ "${run_status}" == "running" || "${run_status}" == "queued" ]] ||
-        smoke_blocker "workflow submission returned unexpected status ${run_status:-<empty>}"
+        smoke_blocker "visibility_contract" "workflow submission returned unexpected status ${run_status:-<empty>}"
+    [[ "${observed_workflow_mode}" == "${SMOKE_WORKFLOW_MODE}" ]] ||
+        smoke_blocker "visibility_contract" "workflow submission returned workflow_mode=${observed_workflow_mode:-<empty>}; expected ${SMOKE_WORKFLOW_MODE}"
+    [[ "${observed_phase}" == "${SMOKE_EXPECTED_PHASE}" ]] ||
+        smoke_blocker "visibility_contract" "workflow submission returned current_phase=${observed_phase:-<empty>}; expected ${SMOKE_EXPECTED_PHASE}"
 
     cat > "${status_input_path}" <<EOF
 {
   "workflowId": "${SMOKE_WORKFLOW_ID}",
   "runId": "${SMOKE_RUN_ID}",
+  "workflowMode": "${SMOKE_WORKFLOW_MODE}",
   "temporal": {
     "address": "${active_temporal_address}",
     "namespace": "${TEMPORAL_NAMESPACE}",
@@ -942,30 +1155,42 @@ EOF
     : > "${status_response_path}"
 
     while ((SECONDS < deadline)); do
-        if ! status_output="$("${REPO_ROOT}/temporal/bin/symphony" status --input "${status_input_path}" --output json 2> "${status_stderr_path}")"; then
+        if ! status_output="$("${TEMPORAL_HELPER_BIN}" status --input "${status_input_path}" --output json 2> "${status_stderr_path}")"; then
             printf '%s\n' "${status_output}" >> "${SMOKE_EVIDENCE_PATH}/status-errors.txt"
             if grep -q "workflow not found" "${status_stderr_path}" 2>/dev/null; then
                 sleep 3
                 continue
             fi
-            smoke_blocker "$(classify_temporal_command_error "status polling" "$(cat "${status_stderr_path}" 2>/dev/null; printf '%s\n' "${status_output}")")"
+            smoke_blocker "temporal" "$(classify_temporal_command_error "status polling" "$(cat "${status_stderr_path}" 2>/dev/null; printf '%s\n' "${status_output}")")"
         fi
 
         printf '%s\n' "${status_output}" > "${status_output_path}"
         if ! extract_json_payload "${status_output_path}" > "${SMOKE_EVIDENCE_PATH}/status-latest.json"; then
-            smoke_blocker "status polling did not return a JSON payload; see ${status_output_path}"
+            smoke_blocker "temporal" "status polling did not return a JSON payload; see ${status_output_path}"
         fi
 
         cat "${SMOKE_EVIDENCE_PATH}/status-latest.json" >> "${status_response_path}"
         printf '\n' >> "${status_response_path}"
         workflow_status="$(json_file_field "${SMOKE_EVIDENCE_PATH}/status-latest.json" "status" 2>/dev/null || true)"
+        observed_workflow_mode="$(json_file_field "${SMOKE_EVIDENCE_PATH}/status-latest.json" "workflow_mode" 2>/dev/null || true)"
+        observed_phase="$(json_file_field "${SMOKE_EVIDENCE_PATH}/status-latest.json" "current_phase" 2>/dev/null || true)"
+        SMOKE_LAST_WORKFLOW_STATUS="${workflow_status}"
+        SMOKE_LAST_CURRENT_PHASE="${observed_phase}"
+
+        [[ "${observed_workflow_mode}" == "${SMOKE_WORKFLOW_MODE}" ]] ||
+            smoke_blocker "visibility_contract" "status polling returned workflow_mode=${observed_workflow_mode:-<empty>}; expected ${SMOKE_WORKFLOW_MODE}"
+        [[ "${observed_phase}" == "${SMOKE_EXPECTED_PHASE}" ]] ||
+            smoke_blocker "visibility_contract" "status polling returned current_phase=${observed_phase:-<empty>}; expected ${SMOKE_EXPECTED_PHASE}"
 
         case "${workflow_status}" in
             succeeded)
                 break
                 ;;
             failed | cancelled)
-                smoke_blocker "workflow ended with status=${workflow_status}; job=${SMOKE_JOB_NAME:-unknown}"
+                job_status="$(smoke_job_status || true)"
+                smoke_blocker \
+                    "$( [[ "${job_status}" == "failed" ]] && printf 'k3s' || printf 'workflow' )" \
+                    "workflow ended with status=${workflow_status}; phase=${SMOKE_LAST_CURRENT_PHASE:-unknown}; job=${SMOKE_JOB_NAME:-unknown}; job_status=${job_status:-unknown}"
                 ;;
         esac
 
@@ -973,7 +1198,7 @@ EOF
     done
 
     if ((SECONDS >= deadline)); then
-        smoke_blocker "$(classify_smoke_timeout "${workflow_status}")"
+        smoke_blocker "timeout" "$(classify_smoke_timeout "${workflow_status}")"
     fi
 
     local artifact_deadline=$((SECONDS + 15))
@@ -984,12 +1209,20 @@ EOF
         sleep 1
     done
 
-    if ! validation_error="$(validate_smoke_artifacts 2>&1)"; then
-        smoke_blocker "invalid smoke artifacts: $(compact_output "${validation_error}")"
+    if ! validation_error="$(
+        validate_smoke_artifacts \
+            "${SMOKE_RESULT_PATH}" \
+            "${SMOKE_WORKPAD_PATH}" \
+            "${run_response_path}" \
+            "${status_response_path}" \
+            "${SMOKE_WORKFLOW_MODE}" \
+            "${SMOKE_EXPECTED_PHASE}" 2>&1
+    )"; then
+        smoke_blocker "artifact_sync" "invalid smoke artifacts: $(compact_output "${validation_error}")"
     fi
 
     capture_smoke_evidence "succeeded"
-    log "Smoke workflow succeeded"
+    log "Smoke workflow succeeded workflow_mode=${SMOKE_WORKFLOW_MODE} phase=${SMOKE_EXPECTED_PHASE}"
     printf 'artifacts: %s\n' "${symphony_path}"
     printf 'evidence: %s\n' "${SMOKE_EVIDENCE_PATH}"
 }
@@ -1010,29 +1243,40 @@ cmd_down() {
     fi
 }
 
-subcommand="${1:-}"
+main() {
+    local subcommand="${1:-}"
 
-case "${subcommand}" in
-    up)
-        cmd_up
-        ;;
-    status)
-        cmd_status
-        ;;
-    smoke)
-        cmd_smoke
-        ;;
-    down)
-        cmd_down
-        ;;
-    env)
-        cmd_env
-        ;;
-    "" | help | --help | -h)
-        usage
-        ;;
-    *)
-        usage
-        exit 2
-        ;;
-esac
+    case "${subcommand}" in
+        up)
+            shift || true
+            cmd_up "$@"
+            ;;
+        status)
+            shift || true
+            cmd_status "$@"
+            ;;
+        smoke)
+            shift || true
+            cmd_smoke "$@"
+            ;;
+        down)
+            shift || true
+            cmd_down "$@"
+            ;;
+        env)
+            shift || true
+            cmd_env "$@"
+            ;;
+        "" | help | --help | -h)
+            usage
+            ;;
+        *)
+            usage
+            exit 2
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

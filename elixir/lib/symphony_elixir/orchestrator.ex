@@ -609,7 +609,9 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
-        Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
+        Logger.info(
+          "event=issue_dispatch issue_id=#{issue.id} issue_identifier=#{issue.identifier} execution_backend=#{Config.execution_kind()} workflow_mode=#{dispatch_workflow_mode()} pid=#{inspect(pid)} attempt=#{inspect(attempt)} workspace_path=#{Execution.workspace_path(issue.identifier || issue.id || "issue")}"
+        )
 
         running =
           Map.put(state.running, issue.id, %{
@@ -1420,7 +1422,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp request_retry_for_identifier(%State{} = state, issue_identifier) do
     case find_running_issue_by_identifier(state.running, issue_identifier) do
       {issue_id, running_entry} ->
-        next_attempt = next_retry_attempt_from_running(running_entry) || 1
+        next_attempt = next_retry_attempt_from_running(running_entry)
 
         retry_metadata =
           %{identifier: issue_identifier, error: "manual retry requested", delay_type: :manual}
@@ -1600,6 +1602,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp runtime_blocker_message(%{"message" => message}) when is_binary(message), do: message
   defp runtime_blocker_message(%{message: message}) when is_binary(message), do: message
   defp runtime_blocker_message(blocker), do: inspect(blocker)
+
+  defp dispatch_workflow_mode do
+    case Config.execution_kind() do
+      "temporal_k3s" -> Config.temporal_workflow_mode()
+      _other -> "n/a"
+    end
+  end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states),
     do: Dispatch.retry_candidate_issue?(issue, active_state_set(), terminal_states)

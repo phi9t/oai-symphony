@@ -33,7 +33,6 @@ defmodule SymphonyElixirWeb.Observability do
       %{} = snapshot -> {:ok, snapshot}
       :timeout -> :timeout
       :unavailable -> :unavailable
-      _ -> :unavailable
     end
   end
 end

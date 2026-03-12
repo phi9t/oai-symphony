@@ -83,7 +83,9 @@ runtimes surface before dispatch instead of failing silently afterward. The conf
 `hooks.before_remove` command also runs before remote Temporal/K3s project roots are deleted, so
 cleanup stays aligned with the local backend. `temporal.workflow_mode` defaults to `phased`; set
 it to `vanilla` when you need the original single-job remote fallback while keeping the normalized
-runtime-state payloads.
+runtime-state payloads. Operators should treat `./dev/temporal-k3s smoke` as the default phased
+proof and `./dev/temporal-k3s smoke --workflow-mode vanilla` as the required fallback proof. Both
+lanes write evidence summaries with the observed workflow mode, phase, status, and failing plane.
 
 You are working on an Org task `{{ issue.identifier }}`.
 
