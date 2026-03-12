@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Org.Client do
   @moduledoc """
-  Executes Org mode tracker operations through `emacsclient`.
+  Executes Org mode tracker operations through the configured Emacs command.
   """
 
   alias SymphonyElixir.{Config, Tracker.Issue}
@@ -78,6 +78,28 @@ defmodule SymphonyElixir.Org.Client do
     end
   end
 
+  @spec deep_dive(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def deep_dive(issue_id, content) when is_binary(issue_id) and is_binary(content) do
+    with {:ok, data} <- invoke("deep_dive", %{"task_id" => issue_id, "content" => content}) do
+      decode_content_response(data, "Deep Dive")
+    end
+  end
+
+  @spec deep_revision(String.t(), String.t(), String.t(), [map()]) ::
+          {:ok, map()} | {:error, term()}
+  def deep_revision(issue_id, mode, content, tasks)
+      when is_binary(issue_id) and is_binary(mode) and is_binary(content) and is_list(tasks) do
+    with {:ok, data} <-
+           invoke("deep_revision", %{
+             "task_id" => issue_id,
+             "mode" => mode,
+             "content" => content,
+             "tasks" => tasks
+           }) do
+      decode_revision_response(data)
+    end
+  end
+
   @spec set_task_state(String.t(), String.t()) :: {:ok, Issue.t()} | {:error, term()}
   def set_task_state(issue_id, state_name)
       when is_binary(issue_id) and is_binary(state_name) do
@@ -99,6 +121,39 @@ defmodule SymphonyElixir.Org.Client do
 
   defp decode_single_issue(data) when is_map(data), do: {:ok, decode_issue!(data)}
   defp decode_single_issue(_data), do: {:error, :invalid_org_issue_payload}
+
+  defp decode_content_response(data, default_section) when is_map(data) do
+    case {string_or_nil(Map.get(data, "taskId")), string_or_nil(Map.get(data, "content"))} do
+      {task_id, content} when is_binary(task_id) and is_binary(content) ->
+        {:ok,
+         %{
+           "taskId" => task_id,
+           "section" => string_or_nil(Map.get(data, "section")) || default_section,
+           "content" => content
+         }}
+
+      _ ->
+        {:error, :invalid_org_workpad_response}
+    end
+  end
+
+  defp decode_content_response(_data, _default_section),
+    do: {:error, :invalid_org_workpad_response}
+
+  defp decode_revision_response(data) when is_map(data) do
+    with {:ok, response} <- decode_content_response(data, "Deep Revision"),
+         {:ok, created_tasks} <- decode_created_tasks(Map.get(data, "createdTasks")) do
+      {:ok,
+       response
+       |> Map.put("mode", string_or_nil(Map.get(data, "mode")) || "draft")
+       |> Map.put("createdTasks", created_tasks)}
+    end
+  end
+
+  defp decode_revision_response(_data), do: {:error, :invalid_org_workpad_response}
+
+  defp decode_created_tasks(nil), do: {:ok, []}
+  defp decode_created_tasks(data), do: decode_issue_list(data)
 
   defp decode_issue!(data) when is_map(data) do
     %Issue{
@@ -203,7 +258,10 @@ defmodule SymphonyElixir.Org.Client do
   end
 
   defp normalize_response({:ok, %{"status" => "ok", "data" => data}}), do: {:ok, data}
-  defp normalize_response({:ok, %{"status" => "error", "error" => error}}), do: {:error, normalize_error(error)}
+
+  defp normalize_response({:ok, %{"status" => "error", "error" => error}}),
+    do: {:error, normalize_error(error)}
+
   defp normalize_response({:ok, _response}), do: {:error, :invalid_org_response}
   defp normalize_response({:error, reason}), do: {:error, reason}
 

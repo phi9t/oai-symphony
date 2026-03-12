@@ -1840,3 +1840,11 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 end
+
+defmodule SymphonyElixir.CoreRecoveryScenarioHarnessTest do
+  use SymphonyElixir.TestSupport
+
+  import SymphonyElixir.TestSupport.RecoveryScenarioHarness
+
+  define_scenarios(SymphonyElixir.TestSupport.RecoveryScenarioHarness.LocalAdapter)
+end

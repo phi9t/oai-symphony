@@ -88,7 +88,7 @@ func BuildWorkflowState(input RunInput, runID, status string) WorkflowState {
 		ProjectID:     input.ProjectID,
 		WorkspacePath: input.Paths.WorkspacePath,
 		ArtifactDir:   artifactDir,
-		JobName:       JobName(input.WorkflowID, runID),
+		JobName:       defaultJobName(input.ProjectID, input.WorkflowID, runID),
 		WorkflowMode:  input.WorkflowMode,
 	}, input, status)
 }
@@ -121,7 +121,7 @@ func NormalizeWorkflowState(state WorkflowState, input RunInput, fallbackStatus 
 		state.ArtifactDir = filepath.Join(input.Paths.OutputsPath, state.RunID)
 	}
 	if strings.TrimSpace(state.JobName) == "" && strings.TrimSpace(state.WorkflowID) != "" && strings.TrimSpace(state.RunID) != "" {
-		state.JobName = JobName(state.WorkflowID, state.RunID)
+		state.JobName = defaultJobName(state.ProjectID, state.WorkflowID, state.RunID)
 	}
 
 	state.Status = normalizedStatus
@@ -186,6 +186,14 @@ func firstNonBlank(values ...string) string {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
 			return trimmed
 		}
+	}
+
+	return ""
+}
+
+func defaultJobName(projectID, workflowID, runID string) string {
+	if strings.TrimSpace(projectID) != "" {
+		return JobResourceName(projectID, workflowID, runID)
 	}
 
 	return ""

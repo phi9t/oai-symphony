@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly K3S_ROOT="${SCRIPT_DIR}/.."
 
-# shellcheck source=../lib/k3s-common.sh
+# shellcheck disable=SC1091
 source "${K3S_ROOT}/lib/k3s-common.sh"
 
 SUBCOMMAND=""
@@ -59,7 +59,7 @@ parse_args() {
 }
 
 job_resource_name() {
-    echo "symphony-job-${PROJECT_ID}-${JOB_NAME}"
+    printf 'symphony-job-%s-%s' "$(resource_project_id)" "$(resource_job_name)"
 }
 
 yaml_double_quote() {
@@ -74,23 +74,93 @@ validate_non_negative_integer() {
     [[ "${value}" =~ ^[0-9]+$ ]]
 }
 
+hash_suffix() {
+    printf '%s' "$1" | cksum | awk '{print $1}' | cut -c1-8
+}
+
+sanitize_name_component() {
+    local value="$1"
+    local max_length="$2"
+    local checksum=""
+    local keep=0
+
+    value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+    [[ -n "${value}" ]] || value="run"
+
+    if (( ${#value} > max_length )); then
+        checksum="$(hash_suffix "${value}")"
+        keep=$((max_length - ${#checksum} - 1))
+        if (( keep < 1 )); then
+            value="${checksum:0:max_length}"
+        else
+            value="${value:0:keep}"
+            value="${value%-}"
+            value="${value}-${checksum}"
+        fi
+    fi
+
+    printf '%s' "${value}"
+}
+
+resource_project_id() {
+    sanitize_name_component "${PROJECT_ID}" 20
+}
+
+resource_job_name() {
+    sanitize_name_component "${JOB_NAME}" 28
+}
+
+require_absolute_path() {
+    local path_value="$1"
+    local flag_name="$2"
+
+    [[ "${path_value}" = /* ]] || die "${flag_name} must be an absolute path"
+}
+
+ensure_writable_dir() {
+    local dir_path="$1"
+    local probe_path="${dir_path}/.symphony-write-test-$$"
+
+    mkdir -p "${dir_path}"
+    : > "${probe_path}" || die "path not writable: ${dir_path}"
+    rm -f "${probe_path}"
+}
+
+validate_run_paths() {
+    require_absolute_path "${PROJECT_ROOT}" "--project-root"
+    require_absolute_path "${SHARED_CACHE_ROOT}" "--shared-cache-root"
+
+    ensure_writable_dir "${PROJECT_ROOT}/home"
+    ensure_writable_dir "${PROJECT_ROOT}/config"
+    ensure_writable_dir "${PROJECT_ROOT}/workspace"
+    ensure_writable_dir "${PROJECT_ROOT}/outputs"
+    ensure_writable_dir "${SHARED_CACHE_ROOT}"
+}
+
 prepare_manifest_vars() {
     RUNTIME_CLASS_BLOCK=""
     GPU_REQUEST_BLOCK=""
     GPU_LIMIT_BLOCK=""
+    RESOURCE_PROJECT_ID="$(resource_project_id)"
+    RESOURCE_JOB_NAME="$(resource_job_name)"
+    RESOURCE_NAME="$(job_resource_name)"
 
     if [[ -n "${RUNTIME_CLASS}" ]]; then
         local escaped_runtime_class
         escaped_runtime_class="$(yaml_double_quote "${RUNTIME_CLASS}")"
+        # shellcheck disable=SC2089
         printf -v RUNTIME_CLASS_BLOCK '\n      runtimeClassName: "%s"' "${escaped_runtime_class}"
     fi
 
     if [[ "${GPU_COUNT}" != "0" ]]; then
+        # shellcheck disable=SC2089
         printf -v GPU_REQUEST_BLOCK '\n              nvidia.com/gpu: "%s"' "${GPU_COUNT}"
+        # shellcheck disable=SC2089
         printf -v GPU_LIMIT_BLOCK '\n              nvidia.com/gpu: "%s"' "${GPU_COUNT}"
     fi
 
-    export RUNTIME_CLASS_BLOCK GPU_REQUEST_BLOCK GPU_LIMIT_BLOCK
+    # shellcheck disable=SC2090
+    export RUNTIME_CLASS_BLOCK GPU_REQUEST_BLOCK GPU_LIMIT_BLOCK RESOURCE_PROJECT_ID RESOURCE_JOB_NAME RESOURCE_NAME
 }
 
 status_json() {
@@ -103,17 +173,16 @@ cmd_run() {
     [[ -n "${JOB_COMMAND}" ]] || die "missing job command"
     validate_non_negative_integer "${GPU_COUNT}" || die "gpu-count must be a non-negative integer"
 
+    validate_run_paths
     check_kubectl
     check_envsubst
-    ensure_dirs "${PROJECT_ROOT}"
 
     REPO_ROOT="$(cd "${K3S_ROOT}/.." && pwd)"
     prepare_manifest_vars
     export PROJECT_ID JOB_NAME NAMESPACE IMAGE CPU_REQUEST MEMORY_REQUEST GPU_COUNT RUNTIME_CLASS TTL_SECONDS_AFTER_FINISHED JOB_COMMAND PROJECT_ROOT SHARED_CACHE_ROOT REPO_ROOT
-    export REPO_ROOT
 
     envsubst < "${K3S_ROOT}/templates/job.yaml" | kubectl_cmd apply -f -
-    log "submitted $(job_resource_name)"
+    log "submitted ${RESOURCE_NAME}"
 }
 
 cmd_status() {

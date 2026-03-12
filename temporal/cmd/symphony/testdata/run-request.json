@@ -1,0 +1,25 @@
+{
+  "workflowId": "issue/alpha",
+  "projectId": "rev-19",
+  "repository": {
+    "originUrl": "https://example.com/repo.git",
+    "defaultBranch": "main"
+  },
+  "codex": {
+    "command": "codex exec --full-auto --json"
+  },
+  "temporal": {
+    "address": "temporal.example:7233",
+    "namespace": "customer-a",
+    "taskQueue": "symphony"
+  },
+  "paths": {
+    "projectRoot": "/tmp/remote/rev-19",
+    "workspacePath": "/tmp/remote/rev-19/workspace",
+    "outputsPath": "/tmp/remote/rev-19/outputs",
+    "promptPath": "/tmp/remote/rev-19/workspace/.symphony/prompt.md",
+    "workpadPath": "/tmp/remote/rev-19/workspace/.symphony/workpad.md",
+    "resultPath": "/tmp/remote/rev-19/workspace/.symphony/run-result.json",
+    "issuePath": "/tmp/remote/rev-19/workspace/.symphony/issue.json"
+  }
+}

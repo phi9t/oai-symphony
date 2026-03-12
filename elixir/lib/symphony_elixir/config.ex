@@ -134,7 +134,10 @@ defmodule SymphonyElixir.Config do
                                  ],
                                  address: [type: :string, default: @default_temporal_address],
                                  namespace: [type: :string, default: @default_temporal_namespace],
-                                 task_queue: [type: :string, default: @default_temporal_task_queue],
+                                 task_queue: [
+                                   type: :string,
+                                   default: @default_temporal_task_queue
+                                 ],
                                  status_poll_ms: [
                                    type: :pos_integer,
                                    default: @default_temporal_status_poll_ms
@@ -179,7 +182,10 @@ defmodule SymphonyElixir.Config do
                                type: :map,
                                default: %{},
                                keys: [
-                                 root: [type: {:or, [:string, nil]}, default: @default_workspace_root]
+                                 root: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_workspace_root
+                                 ]
                                ]
                              ],
                              agent: [
@@ -231,7 +237,10 @@ defmodule SymphonyElixir.Config do
                                  before_run: [type: {:or, [:string, nil]}, default: nil],
                                  after_run: [type: {:or, [:string, nil]}, default: nil],
                                  before_remove: [type: {:or, [:string, nil]}, default: nil],
-                                 timeout_ms: [type: :pos_integer, default: @default_hook_timeout_ms]
+                                 timeout_ms: [
+                                   type: :pos_integer,
+                                   default: @default_hook_timeout_ms
+                                 ]
                                ]
                              ],
                              observability: [
@@ -304,9 +313,6 @@ defmodule SymphonyElixir.Config do
 
       {:error, reason} ->
         {:error, reason}
-
-      _ ->
-        Schema.parse(%{})
     end
   end
 
@@ -649,7 +655,8 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec codex_runtime_settings(Path.t() | nil) :: {:ok, codex_runtime_settings()} | {:error, term()}
+  @spec codex_runtime_settings(Path.t() | nil) ::
+          {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil) do
     with {:ok, settings} <- settings() do
       with {:ok, turn_sandbox_policy} <-
@@ -838,14 +845,20 @@ defmodule SymphonyElixir.Config do
 
   defp extract_tracker_options(section) do
     %{}
-    |> put_if_present(:kind, normalize_tracker_kind(scalar_string_value(Map.get(section, "kind"))))
+    |> put_if_present(
+      :kind,
+      normalize_tracker_kind(scalar_string_value(Map.get(section, "kind")))
+    )
     |> put_if_present(:endpoint, scalar_string_value(Map.get(section, "endpoint")))
     |> put_if_present(:api_key, binary_value(Map.get(section, "api_key"), allow_empty: true))
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
     |> put_if_present(:assignee, scalar_string_value(Map.get(section, "assignee")))
     |> put_if_present(:file, binary_value(Map.get(section, "file")))
     |> put_if_present(:root_id, scalar_string_value(Map.get(section, "root_id")))
-    |> put_if_present(:emacsclient_command, command_value(Map.get(section, "emacsclient_command")))
+    |> put_if_present(
+      :emacsclient_command,
+      command_value(Map.get(section, "emacsclient_command"))
+    )
     |> put_if_present(:state_map, string_map_value(Map.get(section, "state_map")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
@@ -858,7 +871,10 @@ defmodule SymphonyElixir.Config do
 
   defp extract_execution_options(section) do
     %{}
-    |> put_if_present(:kind, normalize_execution_kind(scalar_string_value(Map.get(section, "kind"))))
+    |> put_if_present(
+      :kind,
+      normalize_execution_kind(scalar_string_value(Map.get(section, "kind")))
+    )
   end
 
   defp extract_temporal_options(section) do
@@ -886,7 +902,10 @@ defmodule SymphonyElixir.Config do
     )
     |> put_if_present(:default_cpu, scalar_string_value(Map.get(section, "default_cpu")))
     |> put_if_present(:default_memory, scalar_string_value(Map.get(section, "default_memory")))
-    |> put_if_present(:default_gpu_count, non_negative_integer_value(Map.get(section, "default_gpu_count")))
+    |> put_if_present(
+      :default_gpu_count,
+      non_negative_integer_value(Map.get(section, "default_gpu_count"))
+    )
     |> put_if_present(:runtime_class, scalar_string_value(Map.get(section, "runtime_class")))
   end
 
@@ -897,9 +916,15 @@ defmodule SymphonyElixir.Config do
 
   defp extract_agent_options(section) do
     %{}
-    |> put_if_present(:max_concurrent_agents, integer_value(Map.get(section, "max_concurrent_agents")))
+    |> put_if_present(
+      :max_concurrent_agents,
+      integer_value(Map.get(section, "max_concurrent_agents"))
+    )
     |> put_if_present(:max_turns, positive_integer_value(Map.get(section, "max_turns")))
-    |> put_if_present(:max_retry_backoff_ms, positive_integer_value(Map.get(section, "max_retry_backoff_ms")))
+    |> put_if_present(
+      :max_retry_backoff_ms,
+      positive_integer_value(Map.get(section, "max_retry_backoff_ms"))
+    )
     |> put_if_present(
       :max_concurrent_agents_by_state,
       state_limits_value(Map.get(section, "max_concurrent_agents_by_state"))
@@ -1463,8 +1488,6 @@ defmodule SymphonyElixir.Config do
     |> Map.update("terminal_states", nil, &schema_csv_or_list_value/1)
   end
 
-  defp schema_tracker_payload(_section), do: %{}
-
   defp schema_codex_payload(section) when is_map(section) do
     case Map.get(section, "turn_sandbox_policy") do
       nil ->
@@ -1477,8 +1500,6 @@ defmodule SymphonyElixir.Config do
         Map.delete(section, "turn_sandbox_policy")
     end
   end
-
-  defp schema_codex_payload(_section), do: %{}
 
   defp schema_csv_or_list_value(nil), do: nil
 
