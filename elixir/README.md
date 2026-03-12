@@ -258,6 +258,10 @@ Notes:
   that env var before starting the unattended queue.
 - The default Temporal helper command is now `./temporal/bin/symphony`, which works correctly from
   the repository root.
+- The phase-1 remote golden path is governed by
+  [`../docs/operations/phase-1-remote-validation-matrix.md`](../docs/operations/phase-1-remote-validation-matrix.md).
+  Treat that matrix as the source of truth for gate classes, contract authority, owners, and pass
+  evidence when changing the `Org -> Elixir -> Temporal -> K3s -> Org` path.
 - If the worker dies or K3s jobs fail, restart the stack with `./dev/temporal-k3s up`, check
   `./dev/temporal-k3s status`, and then use the dashboard or `/api/v1/state` to confirm readiness
   has cleared before letting Symphony claim more work.

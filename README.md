@@ -87,6 +87,11 @@ When the remote backend is configured with a non-default Temporal `address` or `
 helper now reuses that connection for workflow `run`, `status`, `cancel`, and `describe`
 operations.
 
+The repo-owned source of truth for the phase-1 remote golden path now lives in
+[`docs/operations/phase-1-remote-validation-matrix.md`](docs/operations/phase-1-remote-validation-matrix.md).
+Use that matrix for required gate classes, contract authority, owners, and pass evidence across
+the `Org -> Elixir -> Temporal -> K3s -> Org` path.
+
 See [elixir/README.md](elixir/README.md) for the detailed bring-up, health-check, and teardown
 workflow.
 
