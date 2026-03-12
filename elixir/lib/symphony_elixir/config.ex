@@ -299,9 +299,6 @@ defmodule SymphonyElixir.Config do
 
       {:error, reason} ->
         {:error, reason}
-
-      _ ->
-        Schema.parse(%{})
     end
   end
 
@@ -631,7 +628,7 @@ defmodule SymphonyElixir.Config do
          :ok <- require_org_root_id(),
          :ok <- require_org_emacsclient_command(),
          :ok <- require_temporal_helper_command(),
-          :ok <- require_repository_origin_url(),
+         :ok <- require_repository_origin_url(),
          :ok <- require_valid_codex_policy_settings(),
          :ok <- require_valid_codex_runtime_settings() do
       require_codex_command()
@@ -1429,8 +1426,6 @@ defmodule SymphonyElixir.Config do
     |> Map.update("terminal_states", nil, &schema_csv_or_list_value/1)
   end
 
-  defp schema_tracker_payload(_section), do: %{}
-
   defp schema_codex_payload(section) when is_map(section) do
     case Map.get(section, "turn_sandbox_policy") do
       nil ->
@@ -1443,8 +1438,6 @@ defmodule SymphonyElixir.Config do
         Map.delete(section, "turn_sandbox_policy")
     end
   end
-
-  defp schema_codex_payload(_section), do: %{}
 
   defp schema_csv_or_list_value(nil), do: nil
 

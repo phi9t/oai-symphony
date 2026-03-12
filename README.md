@@ -48,6 +48,9 @@ task reaches a terminal state without merge, the `before_remove` hook closes any
 before deleting the workspace. Remote runs also bound repeated Temporal status-check failures by
 `codex.stall_timeout_ms`, fail the attempt if the final Org sync cannot be written back, and start
 each retry in a fresh Temporal workflow/K3s job attempt instead of reusing the prior remote IDs.
+The observability API/dashboard also exposes the active remote workflow/run/job identifiers,
+artifact directory, last successful status poll, last Org sync result, and stable failure code when
+those fields are available.
 
 The repository now also ships a repo-owned Temporal/K3s developer stack for the remote backend:
 

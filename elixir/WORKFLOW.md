@@ -113,6 +113,9 @@ No workpad was synced from Org.
 5. The control plane will read `./.symphony/run-result.json` to decide the target Org state.
 6. If remote status checks exceed `codex.stall_timeout_ms` or the final Org sync fails, the control
    plane will fail the run instead of silently retrying forever or dropping the error.
+7. When observability is enabled, the control plane exposes the active remote workflow/run/job IDs,
+   artifact directory, last successful status poll, last Org sync result, and stable failure code
+   through the existing dashboard/API payloads.
 
 ## Required local artifacts
 

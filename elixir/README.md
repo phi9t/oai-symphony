@@ -221,6 +221,9 @@ Notes:
   stall detection; once the budget is exhausted, Symphony fails the run instead of polling forever.
 - If Symphony cannot write the final Org workpad or state transition back after a remote run, it
   fails the attempt instead of silently ignoring the sync error.
+- When the optional observability API is enabled, remote snapshot/issue payloads include the
+  execution backend, workflow/run/job identifiers, artifact directory, last successful status poll,
+  last Org sync result, and a stable failure code when one is known.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -277,6 +280,8 @@ The observability UI now runs on a minimal Phoenix stack:
 - JSON API for operational debugging under `/api/v1/*`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
+- Remote runs surface the current workflow/run/job IDs, artifact directory, last successful status
+  poll, Org sync result, and failure code through the existing JSON payloads.
 
 ## Project Layout
 

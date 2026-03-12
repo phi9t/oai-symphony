@@ -58,6 +58,99 @@ defmodule SymphonyElixir.TemporalCliTest do
     assert {:error, _reason} = TemporalCli.run(%{"workflowId" => "issue/2"}, runner: runner)
   end
 
+  test "TemporalCli default runner shells out through the configured helper command" do
+    helper_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-cli-success-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(helper_root)
+    on_exit(fn -> File.rm_rf(helper_root) end)
+
+    helper_script =
+      write_helper_script!(
+        helper_root,
+        "success.py",
+        """
+        #!/usr/bin/env python3
+        import json
+        import sys
+
+        subcommand = sys.argv[1]
+        input_path = sys.argv[sys.argv.index("--input") + 1]
+
+        with open(input_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+
+        print("helper log line")
+        print(json.dumps({
+            "subcommand": subcommand,
+            "workflowId": payload.get("workflowId"),
+            "status": "running",
+            "echo": payload.get("extra")
+        }))
+        """
+      )
+
+    assert {:ok,
+            %{
+              "subcommand" => "run",
+              "workflowId" => "issue/3",
+              "status" => "running",
+              "echo" => "value"
+            }} =
+             TemporalCli.run(%{"workflowId" => "issue/3", "extra" => "value"},
+               command: helper_script
+             )
+  end
+
+  test "TemporalCli default runner surfaces helper failures and missing output" do
+    helper_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-cli-failure-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(helper_root)
+    on_exit(fn -> File.rm_rf(helper_root) end)
+
+    failing_script =
+      write_helper_script!(
+        helper_root,
+        "fail.py",
+        """
+        #!/usr/bin/env python3
+        print("helper exploded")
+        raise SystemExit(3)
+        """
+      )
+
+    quiet_script =
+      write_helper_script!(
+        helper_root,
+        "quiet.py",
+        """
+        #!/usr/bin/env python3
+        pass
+        """
+      )
+
+    assert {:error, {:temporal_helper_failed, 3, "helper exploded"}} =
+             TemporalCli.run(%{"workflowId" => "issue/4"}, command: failing_script)
+
+    assert {:error, :missing_temporal_helper_output} =
+             TemporalCli.run(%{"workflowId" => "issue/4"}, command: quiet_script)
+  end
+
+  test "TemporalCli validates helper command parsing before shelling out" do
+    assert {:error, :missing_temporal_helper_command} =
+             TemporalCli.run(%{"workflowId" => "issue/5"}, command: "   ")
+
+    assert {:error, :missing_temporal_helper_command} =
+             TemporalCli.run(%{"workflowId" => "issue/5"}, command: "'")
+  end
+
   test "Execution chooses remote workspace paths for temporal_k3s runs" do
     write_workflow_file!(Workflow.workflow_file_path(),
       execution_kind: "temporal_k3s",
@@ -67,5 +160,12 @@ defmodule SymphonyElixir.TemporalCliTest do
     running_entry = %{execution_backend: "temporal_k3s", workspace_path: "/tmp/remote/workspace"}
     assert Execution.workspace_path("MT-1", running_entry) == "/tmp/remote/workspace"
     assert Execution.workspace_path("MT-2") =~ "/tmp/symphony_projects/MT-2/workspace"
+  end
+
+  defp write_helper_script!(root, filename, body) do
+    path = Path.join(root, filename)
+    File.write!(path, body)
+    File.chmod!(path, 0o755)
+    path
   end
 end

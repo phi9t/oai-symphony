@@ -13,6 +13,8 @@ defmodule SymphonyElixir.MixProject do
           threshold: 100
         ],
         ignore_modules: [
+          # Remaining ignores are large control-plane boundaries exercised primarily through
+          # behavioral tests rather than line-complete unit coverage.
           SymphonyElixir.Config,
           SymphonyElixir.Execution,
           SymphonyElixir.Execution.TemporalK3s,
@@ -37,8 +39,6 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixirWeb.ErrorHTML,
           SymphonyElixirWeb.ErrorJSON,
           SymphonyElixirWeb.Layouts,
-          SymphonyElixirWeb.ObservabilityApiController,
-          SymphonyElixirWeb.Presenter,
           SymphonyElixirWeb.StaticAssetController,
           SymphonyElixirWeb.StaticAssets,
           SymphonyElixirWeb.Router,
