@@ -64,15 +64,16 @@ type PathConfig struct {
 }
 
 type RunInput struct {
-	WorkflowID string           `json:"workflowId"`
-	RunID      string           `json:"runId"`
-	ProjectID  string           `json:"projectId"`
-	Temporal   TemporalConfig   `json:"temporal"`
-	Repository RepositoryConfig `json:"repository"`
-	Codex      CodexConfig      `json:"codex"`
-	K3s        K3sConfig        `json:"k3s"`
-	Issue      IssueRef         `json:"issue"`
-	Paths      PathConfig       `json:"paths"`
+	WorkflowID   string           `json:"workflowId"`
+	RunID        string           `json:"runId"`
+	ProjectID    string           `json:"projectId"`
+	WorkflowMode string           `json:"workflowMode"`
+	Temporal     TemporalConfig   `json:"temporal"`
+	Repository   RepositoryConfig `json:"repository"`
+	Codex        CodexConfig      `json:"codex"`
+	K3s          K3sConfig        `json:"k3s"`
+	Issue        IssueRef         `json:"issue"`
+	Paths        PathConfig       `json:"paths"`
 }
 
 type RunResult struct {

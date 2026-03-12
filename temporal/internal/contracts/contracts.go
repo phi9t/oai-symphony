@@ -45,6 +45,14 @@ type ReadinessDetail struct {
 	Reason string `json:"reason"`
 }
 
+type PhaseResponse struct {
+	Name          string `json:"name"`
+	Status        string `json:"status"`
+	JobName       string `json:"jobName,omitempty"`
+	ArtifactDir   string `json:"artifactDir,omitempty"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+}
+
 type WorkflowResponse struct {
 	WorkflowID    string           `json:"workflowId,omitempty"`
 	RunID         string           `json:"runId,omitempty"`
@@ -53,6 +61,9 @@ type WorkflowResponse struct {
 	WorkspacePath string           `json:"workspacePath,omitempty"`
 	ArtifactDir   string           `json:"artifactDir,omitempty"`
 	JobName       string           `json:"jobName,omitempty"`
+	WorkflowMode  string           `json:"workflow_mode,omitempty"`
+	CurrentPhase  string           `json:"current_phase,omitempty"`
+	Phases        []PhaseResponse  `json:"phases,omitempty"`
 	Readiness     *ReadinessDetail `json:"readiness,omitempty"`
 	Failure       *FailureDetail   `json:"failure,omitempty"`
 }
@@ -83,6 +94,17 @@ func (r ReadinessDetail) Validate() error {
 	if strings.TrimSpace(r.Reason) == "" {
 		return fmt.Errorf("readiness.reason is required")
 	}
+	return nil
+}
+
+func (p PhaseResponse) Validate() error {
+	if strings.TrimSpace(p.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if strings.TrimSpace(p.Status) == "" {
+		return fmt.Errorf("status is required")
+	}
+
 	return nil
 }
 
@@ -135,6 +157,12 @@ func (r WorkflowResponse) Validate(subcommand string) error {
 	if r.Failure != nil {
 		if err := r.Failure.Validate(); err != nil {
 			return err
+		}
+	}
+
+	for index, phase := range r.Phases {
+		if err := phase.Validate(); err != nil {
+			return fmt.Errorf("phases[%d]: %w", index, err)
 		}
 	}
 

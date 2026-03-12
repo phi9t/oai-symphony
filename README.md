@@ -101,6 +101,10 @@ Repeated automation should stay on self-hosted Docker-capable runners only. Unti
 The remote K3s workflow also supports optional `k3s.default_gpu_count` and `k3s.runtime_class`
 settings for GPU-backed jobs without changing CPU-only manifests.
 
+Remote workflows now accept `temporal.workflow_mode: phased | vanilla`. `phased` is the shipped
+default and reports normalized phase-aware runtime state, while `vanilla` preserves the original
+single-agent remote job as a first-class fallback.
+
 When the remote backend is configured with a non-default Temporal `address` or `namespace`, the
 helper now reuses that connection for workflow `run`, `status`, `cancel`, and `describe`
 operations.

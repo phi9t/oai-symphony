@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	workflowpb "go.temporal.io/api/workflow/v1"
 	workflowservice "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 
 	"symphony-temporal/internal/activities"
 	"symphony-temporal/internal/contracts"
@@ -25,6 +27,8 @@ import (
 type fakeTemporalClient struct {
 	workflowRun        client.WorkflowRun
 	describeResponse   *workflowservice.DescribeWorkflowExecutionResponse
+	queryResponse      any
+	queryErr           error
 	executeWorkflowErr error
 	describeErr        error
 	cancelErr          error
@@ -33,10 +37,30 @@ type fakeTemporalClient struct {
 	executeWorkflowID  string
 	executeTaskQueue   string
 	executeWorkflowArg any
+	queryWorkflowID    string
+	queryRunID         string
+	queryType          string
 	systemInfoErr      error
 	namespaceErr       error
 	taskQueueResponses map[enumspb.TaskQueueType]*workflowservice.DescribeTaskQueueResponse
 	taskQueueErrors    map[enumspb.TaskQueueType]error
+}
+
+type fakeEncodedValue struct {
+	value any
+}
+
+func (f fakeEncodedValue) HasValue() bool {
+	return f.value != nil
+}
+
+func (f fakeEncodedValue) Get(valuePtr interface{}) error {
+	data, err := json.Marshal(f.value)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(data, valuePtr)
 }
 
 func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ any, args ...any) (client.WorkflowRun, error) {
@@ -52,6 +76,18 @@ func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.S
 
 func (f *fakeTemporalClient) DescribeWorkflowExecution(_ context.Context, _ string, _ string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
 	return f.describeResponse, f.describeErr
+}
+
+func (f *fakeTemporalClient) QueryWorkflow(_ context.Context, workflowID string, runID string, queryType string, _ ...interface{}) (converter.EncodedValue, error) {
+	f.queryWorkflowID = workflowID
+	f.queryRunID = runID
+	f.queryType = queryType
+
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
+
+	return fakeEncodedValue{value: f.queryResponse}, nil
 }
 
 func (f *fakeTemporalClient) CancelWorkflow(_ context.Context, workflowID string, runID string) error {
@@ -153,6 +189,12 @@ func TestRunCommandUsesTemporalConfigFromPayload(t *testing.T) {
 	if payload.JobName != activities.JobResourceName("REV-7", "issue/1", "run-001") {
 		t.Fatalf("expected resource-stable job name, got %#v", payload)
 	}
+	if payload.WorkflowMode != activities.WorkflowModePhased || payload.CurrentPhase != activities.PhaseExecute {
+		t.Fatalf("expected phased workflow state in run payload, got %#v", payload)
+	}
+	if len(payload.Phases) != 1 || payload.Phases[0].Status != "running" {
+		t.Fatalf("expected normalized phases in run payload, got %#v", payload.Phases)
+	}
 	if payload.Readiness == nil || payload.Readiness.State != contracts.ReadinessPending {
 		t.Fatalf("expected readiness payload, got %#v", payload)
 	}
@@ -164,6 +206,17 @@ func TestStatusCommandUsesTemporalConfigFromPayload(t *testing.T) {
 			WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
 				Execution: &commonpb.WorkflowExecution{RunId: "run-001"},
 				Status:    enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+			},
+		},
+		queryResponse: activities.WorkflowState{
+			WorkflowID:   "issue/1",
+			RunID:        "run-001",
+			Status:       "running",
+			WorkflowMode: activities.WorkflowModePhased,
+			CurrentPhase: "plan",
+			Phases: []activities.PhaseState{
+				{Name: "perceive", Status: "succeeded"},
+				{Name: "plan", Status: "running"},
 			},
 		},
 	}
@@ -193,6 +246,60 @@ func TestStatusCommandUsesTemporalConfigFromPayload(t *testing.T) {
 
 	if payload.WorkflowID != "issue/1" || payload.RunID != "run-001" || payload.Status != "running" {
 		t.Fatalf("unexpected status payload: %#v", payload)
+	}
+	if payload.WorkflowMode != activities.WorkflowModePhased || payload.CurrentPhase != "plan" {
+		t.Fatalf("expected normalized workflow state, got %#v", payload)
+	}
+	if len(payload.Phases) != 2 {
+		t.Fatalf("expected normalized phases in payload, got %#v", payload.Phases)
+	}
+	if fakeClient.queryWorkflowID != "issue/1" || fakeClient.queryRunID != "run-001" || fakeClient.queryType != "symphony_state" {
+		t.Fatalf("unexpected workflow query: workflow=%q run=%q type=%q", fakeClient.queryWorkflowID, fakeClient.queryRunID, fakeClient.queryType)
+	}
+	if payload.Readiness == nil || payload.Readiness.State != contracts.ReadinessPending {
+		t.Fatalf("expected readiness payload, got %#v", payload)
+	}
+}
+
+func TestStatusCommandFallsBackToWorkflowModeWhenQueryUnavailable(t *testing.T) {
+	fakeClient := &fakeTemporalClient{
+		describeResponse: &workflowservice.DescribeWorkflowExecutionResponse{
+			WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+				Execution: &commonpb.WorkflowExecution{RunId: "run-vanilla"},
+				Status:    enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+			},
+		},
+		queryErr: errors.New("query unavailable"),
+	}
+
+	var capturedOptions client.Options
+	stdout, _ := installTestHooks(t, fakeClient, &capturedOptions)
+
+	inputPath := writeJSONInput(t, workflowInput{
+		WorkflowID:   "issue/1",
+		WorkflowMode: "vanilla",
+		Temporal: activities.TemporalConfig{
+			Address:   "temporal.example:7233",
+			Namespace: "customer-a",
+		},
+	})
+
+	if err := statusCommand([]string{"--input", inputPath, "--output", "json"}); err != nil {
+		t.Fatalf("statusCommand returned error: %v", err)
+	}
+
+	assertDialOptions(t, capturedOptions)
+
+	var payload contracts.WorkflowResponse
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unable to decode stdout JSON: %v", err)
+	}
+
+	if payload.WorkflowMode != activities.WorkflowModeVanilla || payload.CurrentPhase != activities.PhaseRun {
+		t.Fatalf("expected vanilla fallback payload, got %#v", payload)
+	}
+	if len(payload.Phases) != 1 || payload.Phases[0].Name != activities.PhaseRun || payload.Phases[0].Status != "running" {
+		t.Fatalf("expected fallback phases in payload, got %#v", payload.Phases)
 	}
 	if payload.Readiness == nil || payload.Readiness.State != contracts.ReadinessPending {
 		t.Fatalf("expected readiness payload, got %#v", payload)

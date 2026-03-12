@@ -742,6 +742,9 @@ defmodule SymphonyElixir.Orchestrator do
             execution_backend: Config.execution_kind(),
             workflow_id: nil,
             workflow_run_id: nil,
+            workflow_mode: nil,
+            current_phase: nil,
+            phases: nil,
             project_id: nil,
             workspace_path: Execution.workspace_path(issue.identifier || issue.id || "issue"),
             artifact_dir: nil,
@@ -1072,6 +1075,9 @@ defmodule SymphonyElixir.Orchestrator do
           execution_backend: Map.get(metadata, :execution_backend),
           workflow_id: Map.get(metadata, :workflow_id),
           workflow_run_id: Map.get(metadata, :workflow_run_id),
+          workflow_mode: Map.get(metadata, :workflow_mode),
+          current_phase: Map.get(metadata, :current_phase),
+          phases: Map.get(metadata, :phases),
           project_id: Map.get(metadata, :project_id),
           workspace_path: Map.get(metadata, :workspace_path),
           artifact_dir: Map.get(metadata, :artifact_dir),
@@ -1166,6 +1172,9 @@ defmodule SymphonyElixir.Orchestrator do
         execution_backend: execution_backend_for_update(Map.get(running_entry, :execution_backend), update),
         workflow_id: workflow_id_for_update(Map.get(running_entry, :workflow_id), update),
         workflow_run_id: workflow_run_id_for_update(Map.get(running_entry, :workflow_run_id), update),
+        workflow_mode: workflow_mode_for_update(Map.get(running_entry, :workflow_mode), update),
+        current_phase: current_phase_for_update(Map.get(running_entry, :current_phase), update),
+        phases: phases_for_update(Map.get(running_entry, :phases), update),
         project_id: project_id_for_update(Map.get(running_entry, :project_id), update),
         workspace_path: workspace_path_for_update(Map.get(running_entry, :workspace_path), update),
         artifact_dir: artifact_dir_for_update(Map.get(running_entry, :artifact_dir), update),
@@ -1223,6 +1232,43 @@ defmodule SymphonyElixir.Orchestrator do
        do: workflow_run_id
 
   defp workflow_run_id_for_update(existing, _update), do: existing
+
+  defp workflow_mode_for_update(_existing, %{workflow_mode: workflow_mode})
+       when is_binary(workflow_mode),
+       do: workflow_mode
+
+  defp workflow_mode_for_update(existing, %{payload: %{params: params}}) when is_map(params) do
+    case Map.get(params, "workflow_mode") || Map.get(params, "workflowMode") do
+      workflow_mode when is_binary(workflow_mode) -> workflow_mode
+      _ -> existing
+    end
+  end
+
+  defp workflow_mode_for_update(existing, _update), do: existing
+
+  defp current_phase_for_update(_existing, %{current_phase: current_phase})
+       when is_binary(current_phase),
+       do: current_phase
+
+  defp current_phase_for_update(existing, %{payload: %{params: params}}) when is_map(params) do
+    case Map.get(params, "current_phase") || Map.get(params, "currentPhase") do
+      current_phase when is_binary(current_phase) -> current_phase
+      _ -> existing
+    end
+  end
+
+  defp current_phase_for_update(existing, _update), do: existing
+
+  defp phases_for_update(_existing, %{phases: phases}) when is_list(phases), do: phases
+
+  defp phases_for_update(existing, %{payload: %{params: params}}) when is_map(params) do
+    case Map.get(params, "phases") do
+      phases when is_list(phases) -> phases
+      _ -> existing
+    end
+  end
+
+  defp phases_for_update(existing, _update), do: existing
 
   defp project_id_for_update(_existing, %{project_id: project_id}) when is_binary(project_id),
     do: project_id

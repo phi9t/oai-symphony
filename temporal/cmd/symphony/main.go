@@ -17,6 +17,7 @@ import (
 	"go.temporal.io/api/serviceerror"
 	workflowservice "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 
 	"symphony-temporal/internal/activities"
 	"symphony-temporal/internal/contracts"
@@ -24,9 +25,10 @@ import (
 )
 
 type workflowInput struct {
-	WorkflowID string                    `json:"workflowId"`
-	RunID      string                    `json:"runId"`
-	Temporal   activities.TemporalConfig `json:"temporal"`
+	WorkflowID   string                    `json:"workflowId"`
+	RunID        string                    `json:"runId"`
+	WorkflowMode string                    `json:"workflowMode"`
+	Temporal     activities.TemporalConfig `json:"temporal"`
 }
 
 type readinessInput struct {
@@ -68,6 +70,7 @@ type readinessPayload struct {
 type temporalClient interface {
 	ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow any, args ...any) (client.WorkflowRun, error)
 	DescribeWorkflowExecution(ctx context.Context, workflowID string, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
+	QueryWorkflow(ctx context.Context, workflowID string, runID string, queryType string, args ...interface{}) (converter.EncodedValue, error)
 	CancelWorkflow(ctx context.Context, workflowID string, runID string) error
 	GetSystemInfo(ctx context.Context) (*workflowservice.GetSystemInfoResponse, error)
 	DescribeNamespace(ctx context.Context, namespace string) (*workflowservice.DescribeNamespaceResponse, error)
@@ -179,30 +182,16 @@ func runCommand(args []string) error {
 	if err != nil {
 		var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
 		if errors.As(err, &alreadyStarted) {
-			return printWorkflowResponse(*outputKind, "run", contracts.WorkflowResponse{
-				WorkflowID:    input.WorkflowID,
-				RunID:         alreadyStarted.RunId,
-				Status:        "running",
-				ProjectID:     input.ProjectID,
-				WorkspacePath: input.Paths.WorkspacePath,
-				ArtifactDir:   filepath.Join(input.Paths.OutputsPath, alreadyStarted.RunId),
-				JobName:       activities.JobResourceName(input.ProjectID, input.WorkflowID, alreadyStarted.RunId),
-				Readiness:     readinessForStatus("running"),
-			})
+			state := activities.BuildWorkflowState(input, alreadyStarted.RunId, "running")
+			return printWorkflowResponse(*outputKind, "run", workflowResponseFromState(state, readinessForStatus("running")))
 		}
 		return classifyTemporalError("start workflow", err)
 	}
 
-	return printWorkflowResponse(*outputKind, "run", contracts.WorkflowResponse{
-		WorkflowID:    we.GetID(),
-		RunID:         we.GetRunID(),
-		Status:        "running",
-		ProjectID:     input.ProjectID,
-		WorkspacePath: input.Paths.WorkspacePath,
-		ArtifactDir:   filepath.Join(input.Paths.OutputsPath, we.GetRunID()),
-		JobName:       activities.JobResourceName(input.ProjectID, we.GetID(), we.GetRunID()),
-		Readiness:     readinessForStatus("running"),
-	})
+	state := activities.BuildWorkflowState(input, we.GetRunID(), "running")
+	state.WorkflowID = we.GetID()
+	state = activities.NormalizeWorkflowState(state, input, "running")
+	return printWorkflowResponse(*outputKind, "run", workflowResponseFromState(state, readinessForStatus("running")))
 }
 
 func statusCommand(args []string) error {
@@ -254,13 +243,13 @@ func workflowStatusCommand(subcommand string, args []string) error {
 	}
 
 	status := workflowStatus(info.Status)
+	state := fallbackWorkflowState(input, runID, status)
 
-	return printWorkflowResponse(*outputKind, subcommand, contracts.WorkflowResponse{
-		WorkflowID: input.WorkflowID,
-		RunID:      runID,
-		Status:     status,
-		Readiness:  readinessForStatus(status),
-	})
+	if queriedState, err := queryWorkflowState(ctx, c, input, runID, status); err == nil {
+		state = queriedState
+	}
+
+	return printWorkflowResponse(*outputKind, subcommand, workflowResponseFromState(state, readinessForStatus(status)))
 }
 
 func cancelCommand(args []string) error {
@@ -296,12 +285,8 @@ func cancelCommand(args []string) error {
 		return classifyTemporalError("cancel workflow", err)
 	}
 
-	return printWorkflowResponse(*outputKind, "cancel", contracts.WorkflowResponse{
-		WorkflowID: input.WorkflowID,
-		RunID:      input.RunID,
-		Status:     "cancelled",
-		Readiness:  readinessForStatus("cancelled"),
-	})
+	state := fallbackWorkflowState(input, input.RunID, "cancelled")
+	return printWorkflowResponse(*outputKind, "cancel", workflowResponseFromState(state, readinessForStatus("cancelled")))
 }
 
 func readinessCommand(args []string) error {
@@ -564,6 +549,68 @@ func workflowStatus(status enumspb.WorkflowExecutionStatus) string {
 	default:
 		return "running"
 	}
+}
+
+func queryWorkflowState(ctx context.Context, c temporalClient, input workflowInput, runID, status string) (activities.WorkflowState, error) {
+	queryValue, err := c.QueryWorkflow(ctx, input.WorkflowID, runID, "symphony_state")
+	if err != nil {
+		return activities.WorkflowState{}, err
+	}
+
+	var state activities.WorkflowState
+	if err := queryValue.Get(&state); err != nil {
+		return activities.WorkflowState{}, err
+	}
+
+	return activities.NormalizeWorkflowState(state, workflowStateInput(input, runID), status), nil
+}
+
+func fallbackWorkflowState(input workflowInput, runID, status string) activities.WorkflowState {
+	return activities.BuildWorkflowState(workflowStateInput(input, runID), runID, status)
+}
+
+func workflowStateInput(input workflowInput, runID string) activities.RunInput {
+	return activities.RunInput{
+		WorkflowID:   input.WorkflowID,
+		RunID:        runID,
+		WorkflowMode: input.WorkflowMode,
+		Temporal:     input.Temporal,
+	}
+}
+
+func workflowResponseFromState(state activities.WorkflowState, readiness *contracts.ReadinessDetail) contracts.WorkflowResponse {
+	return contracts.WorkflowResponse{
+		WorkflowID:    state.WorkflowID,
+		RunID:         state.RunID,
+		Status:        state.Status,
+		ProjectID:     state.ProjectID,
+		WorkspacePath: state.WorkspacePath,
+		ArtifactDir:   state.ArtifactDir,
+		JobName:       state.JobName,
+		WorkflowMode:  state.WorkflowMode,
+		CurrentPhase:  state.CurrentPhase,
+		Phases:        contractPhases(state.Phases),
+		Readiness:     readiness,
+	}
+}
+
+func contractPhases(phases []activities.PhaseState) []contracts.PhaseResponse {
+	if len(phases) == 0 {
+		return nil
+	}
+
+	normalized := make([]contracts.PhaseResponse, 0, len(phases))
+	for _, phase := range phases {
+		normalized = append(normalized, contracts.PhaseResponse{
+			Name:          phase.Name,
+			Status:        phase.Status,
+			JobName:       phase.JobName,
+			ArtifactDir:   phase.ArtifactDir,
+			WorkspacePath: phase.WorkspacePath,
+		})
+	}
+
+	return normalized
 }
 
 func envOr(key, fallback string) string {

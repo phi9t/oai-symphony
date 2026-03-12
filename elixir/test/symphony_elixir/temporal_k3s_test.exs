@@ -252,6 +252,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
           assert File.read!(workpad_path) == "workpad for issue-remote"
           assert File.read!(issue_path) =~ ~s("identifier": "REV-11")
           assert get_in(payload, ["repository", "originUrl"]) == "https://example.com/repo.git"
+          assert payload["workflowMode"] == "phased"
           assert_temporal_connection_payload(payload)
 
           Agent.update(runner_state, fn state ->
@@ -266,15 +267,27 @@ defmodule SymphonyElixir.TemporalK3sTest do
           end)
 
           {:ok,
-           Jason.encode!(%{
-             "workflowId" => "issue/issue-remote",
-             "runId" => "run-001",
-             "status" => "queued",
-             "projectId" => Map.get(payload, "projectId"),
-             "workspacePath" => workspace_path,
-             "artifactDir" => outputs_path,
-             "jobName" => "symphony-job-issue-remote"
-           })}
+           Jason.encode!(
+             Map.merge(
+               %{
+                 "workflowId" => "issue/issue-remote",
+                 "runId" => "run-001",
+                 "status" => "queued",
+                 "projectId" => Map.get(payload, "projectId"),
+                 "workspacePath" => workspace_path,
+                 "artifactDir" => outputs_path,
+                 "jobName" => "symphony-job-issue-remote"
+               },
+               normalized_remote_phase_payload(
+                 "phased",
+                 "execute",
+                 "queued",
+                 "symphony-job-issue-remote",
+                 outputs_path,
+                 workspace_path
+               )
+             )
+           )}
 
         "status" ->
           Agent.get_and_update(runner_state, fn state ->
@@ -298,27 +311,47 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
                 2 ->
                   {:ok,
-                   %{
-                     "workflowId" => "issue/issue-remote",
-                     "runId" => "run-001",
-                     "status" => "queued",
-                     "projectId" => Map.get(state.run_payload, "projectId"),
-                     "workspacePath" => state.workspace_path,
-                     "artifactDir" => state.outputs_path,
-                     "jobName" => "symphony-job-issue-remote"
-                   }}
+                   Map.merge(
+                     %{
+                       "workflowId" => "issue/issue-remote",
+                       "runId" => "run-001",
+                       "status" => "queued",
+                       "projectId" => Map.get(state.run_payload, "projectId"),
+                       "workspacePath" => state.workspace_path,
+                       "artifactDir" => state.outputs_path,
+                       "jobName" => "symphony-job-issue-remote"
+                     },
+                     normalized_remote_phase_payload(
+                       "phased",
+                       "execute",
+                       "queued",
+                       "symphony-job-issue-remote",
+                       state.outputs_path,
+                       state.workspace_path
+                     )
+                   )}
 
                 3 ->
                   {:ok,
-                   %{
-                     "workflowId" => "issue/issue-remote",
-                     "runId" => "run-002",
-                     "status" => "running",
-                     "projectId" => Map.get(state.run_payload, "projectId"),
-                     "workspacePath" => state.workspace_path,
-                     "artifactDir" => state.outputs_path,
-                     "jobName" => "symphony-job-issue-remote"
-                   }}
+                   Map.merge(
+                     %{
+                       "workflowId" => "issue/issue-remote",
+                       "runId" => "run-002",
+                       "status" => "running",
+                       "projectId" => Map.get(state.run_payload, "projectId"),
+                       "workspacePath" => state.workspace_path,
+                       "artifactDir" => state.outputs_path,
+                       "jobName" => "symphony-job-issue-remote"
+                     },
+                     normalized_remote_phase_payload(
+                       "phased",
+                       "execute",
+                       "running",
+                       "symphony-job-issue-remote",
+                       state.outputs_path,
+                       state.workspace_path
+                     )
+                   )}
 
                 4 ->
                   File.write!(state.workpad_path, final_workpad)
@@ -336,15 +369,25 @@ defmodule SymphonyElixir.TemporalK3sTest do
                   )
 
                   {:ok,
-                   %{
-                     "workflowId" => "issue/issue-remote",
-                     "runId" => "run-002",
-                     "status" => "succeeded",
-                     "projectId" => Map.get(state.run_payload, "projectId"),
-                     "workspacePath" => state.workspace_path,
-                     "artifactDir" => state.outputs_path,
-                     "jobName" => "symphony-job-issue-remote"
-                   }}
+                   Map.merge(
+                     %{
+                       "workflowId" => "issue/issue-remote",
+                       "runId" => "run-002",
+                       "status" => "succeeded",
+                       "projectId" => Map.get(state.run_payload, "projectId"),
+                       "workspacePath" => state.workspace_path,
+                       "artifactDir" => state.outputs_path,
+                       "jobName" => "symphony-job-issue-remote"
+                     },
+                     normalized_remote_phase_payload(
+                       "phased",
+                       "execute",
+                       "succeeded",
+                       "symphony-job-issue-remote",
+                       state.outputs_path,
+                       state.workspace_path
+                     )
+                   )}
               end
 
             updated_state = %{
@@ -373,20 +416,34 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert session_started.execution_backend == "temporal_k3s"
     assert session_started.workflow_id == "issue/issue-remote"
     assert session_started.workflow_run_id == "run-001"
+    assert session_started.workflow_mode == "phased"
+    assert session_started.current_phase == "execute"
+
+    assert session_started.phases == [
+             %{
+               "name" => "execute",
+               "status" => "queued",
+               "jobName" => "symphony-job-issue-remote",
+               "artifactDir" => Path.join(k3s_project_root, "REV-11/outputs"),
+               "workspacePath" => Path.join(k3s_project_root, "REV-11/workspace")
+             }
+           ]
+
     assert session_started.project_id == "REV-11"
     assert session_started.job_name == "symphony-job-issue-remote"
     assert session_started.payload.method == "temporal/session_started"
     assert session_started.payload.params["workflowId"] == "issue/issue-remote"
     assert session_started.payload.params["runId"] == "run-001"
+    assert session_started.payload.params["workflow_mode"] == "phased"
 
     assert_receive {:codex_worker_update, "issue-remote", queued_update}
-    assert_temporal_status_update(queued_update, "queued", "run-001")
+    assert_temporal_status_update(queued_update, "queued", "run-001", "phased", "execute")
 
     assert_receive {:codex_worker_update, "issue-remote", running_update}
-    assert_temporal_status_update(running_update, "running", "run-002")
+    assert_temporal_status_update(running_update, "running", "run-002", "phased", "execute")
 
     assert_receive {:codex_worker_update, "issue-remote", success_update}
-    assert_temporal_status_update(success_update, "succeeded", "run-002")
+    assert_temporal_status_update(success_update, "succeeded", "run-002", "phased", "execute")
 
     assert_receive {:org_replace_workpad_called, "issue-remote", ^final_workpad}
     assert_receive {:org_set_task_state_called, "issue-remote", "Done"}
@@ -395,6 +452,172 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert length(status_payloads) == 4
     assert Enum.all?(status_payloads, &temporal_connection_payload?/1)
     refute_receive {:codex_worker_update, "issue-remote", _}, 20
+  end
+
+  test "TemporalK3s preserves the original single-job remote path when workflow_mode is vanilla" do
+    Application.put_env(:symphony_elixir, :org_client_module, FakeOrgClient)
+
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-k3s-vanilla-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+    on_exit(fn -> File.rm_rf(k3s_project_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_file: "/tmp/revision-plan.org",
+      tracker_root_id: "root-id",
+      execution_kind: "temporal_k3s",
+      temporal_workflow_mode: "vanilla",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_status_poll_ms: 1,
+      codex_stall_timeout_ms: 50,
+      k3s_project_root: k3s_project_root
+    )
+
+    issue = %Issue{
+      id: "issue-remote-vanilla",
+      identifier: "REV-23-VANILLA",
+      title: "Preserve vanilla fallback",
+      description: "Keep the legacy one-job remote path operational",
+      state: "In Progress"
+    }
+
+    final_workpad = """
+    ### Environment
+    `remote:/workspace@vanilla123`
+
+    ### Plan
+    - [x] Keep the original remote fallback running
+
+    ### Acceptance Criteria
+    - [x] Vanilla mode stays single-job
+
+    ### Validation
+    - [x] remote vanilla smoke
+
+    ### Notes
+    - Legacy contract preserved
+    """
+
+    {:ok, runner_state} =
+      Agent.start_link(fn ->
+        %{
+          workpad_path: nil,
+          result_path: nil,
+          workspace_path: nil,
+          outputs_path: nil
+        }
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(runner_state) do
+        Agent.stop(runner_state)
+      end
+    end)
+
+    runner = fn _command, subcommand, payload ->
+      case subcommand do
+        "run" ->
+          assert payload["workflowMode"] == "vanilla"
+          assert File.read!(get_in(payload, ["paths", "workpadPath"])) == "workpad for issue-remote-vanilla"
+          assert_temporal_connection_payload(payload)
+
+          Agent.update(runner_state, fn state ->
+            %{
+              state
+              | workpad_path: get_in(payload, ["paths", "workpadPath"]),
+                result_path: get_in(payload, ["paths", "resultPath"]),
+                workspace_path: get_in(payload, ["paths", "workspacePath"]),
+                outputs_path: get_in(payload, ["paths", "outputsPath"])
+            }
+          end)
+
+          {:ok,
+           Jason.encode!(
+             Map.merge(
+               %{
+                 "workflowId" => "issue/issue-remote-vanilla",
+                 "runId" => "run-vanilla-001",
+                 "status" => "running",
+                 "projectId" => Map.get(payload, "projectId"),
+                 "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+                 "artifactDir" => get_in(payload, ["paths", "outputsPath"]),
+                 "jobName" => "symphony-job-issue-remote-vanilla"
+               },
+               normalized_remote_phase_payload(
+                 "vanilla",
+                 "run",
+                 "running",
+                 "symphony-job-issue-remote-vanilla",
+                 get_in(payload, ["paths", "outputsPath"]),
+                 get_in(payload, ["paths", "workspacePath"])
+               )
+             )
+           )}
+
+        "status" ->
+          Agent.get(runner_state, fn state ->
+            File.write!(state.workpad_path, final_workpad)
+
+            File.write!(
+              state.result_path,
+              Jason.encode!(%{
+                "status" => "succeeded",
+                "targetState" => "Done",
+                "summary" => "Vanilla fallback completed.",
+                "validation" => ["remote vanilla smoke"],
+                "blockedReason" => nil,
+                "needsContinuation" => false
+              })
+            )
+
+            {:ok,
+             Jason.encode!(
+               Map.merge(
+                 %{
+                   "workflowId" => "issue/issue-remote-vanilla",
+                   "runId" => "run-vanilla-001",
+                   "status" => "succeeded",
+                   "projectId" => "REV-23-VANILLA",
+                   "workspacePath" => state.workspace_path,
+                   "artifactDir" => state.outputs_path,
+                   "jobName" => "symphony-job-issue-remote-vanilla"
+                 },
+                 normalized_remote_phase_payload(
+                   "vanilla",
+                   "run",
+                   "succeeded",
+                   "symphony-job-issue-remote-vanilla",
+                   state.outputs_path,
+                   state.workspace_path
+                 )
+               )
+             )}
+          end)
+      end
+    end
+
+    assert :ok = TemporalK3s.run(issue, self(), runner: runner)
+
+    assert_receive {:org_get_workpad_called, "issue-remote-vanilla"}
+
+    assert_receive {:codex_worker_update, "issue-remote-vanilla", session_started}
+    assert session_started.workflow_mode == "vanilla"
+    assert session_started.current_phase == "run"
+    assert session_started.payload.params["workflow_mode"] == "vanilla"
+    assert session_started.payload.params["current_phase"] == "run"
+
+    assert_receive {:codex_worker_update, "issue-remote-vanilla", success_update}
+    assert_temporal_status_update(success_update, "succeeded", "run-vanilla-001", "vanilla", "run")
+
+    assert_receive {:org_replace_workpad_called, "issue-remote-vanilla", ^final_workpad}
+    assert_receive {:org_set_task_state_called, "issue-remote-vanilla", "Done"}
   end
 
   test "TemporalK3s raises once repeated status failures exceed the stall timeout budget" do
@@ -642,7 +865,11 @@ defmodule SymphonyElixir.TemporalK3sTest do
         Application.delete_env(:symphony_elixir, :temporal_retry_issue_store)
 
         if Process.alive?(issue_store) do
-          Agent.stop(issue_store)
+          try do
+            Agent.stop(issue_store)
+          catch
+            :exit, {:noproc, _details} -> :ok
+          end
         end
 
         File.rm_rf(helper_root)
@@ -1500,13 +1727,35 @@ defmodule SymphonyElixir.TemporalK3sTest do
          execution_backend: "temporal_k3s",
          workflow_id: "issue/issue-remote-state",
          workflow_run_id: "run-001",
+         workflow_mode: "phased",
+         current_phase: "execute",
+         phases:
+           normalized_remote_phase_payload(
+             "phased",
+             "execute",
+             "queued",
+             "symphony-job-rev-12",
+             "/tmp/remote/rev-12/outputs",
+             "/tmp/remote/rev-12/workspace"
+           )["phases"],
          project_id: "rev-12",
          workspace_path: "/tmp/remote/rev-12/workspace",
          artifact_dir: "/tmp/remote/rev-12/outputs",
          job_name: "symphony-job-rev-12",
          payload: %{
            method: "temporal/session_started",
-           params: %{"workflowId" => "issue/issue-remote-state", "runId" => "run-001"}
+           params:
+             Map.merge(
+               %{"workflowId" => "issue/issue-remote-state", "runId" => "run-001"},
+               normalized_remote_phase_payload(
+                 "phased",
+                 "execute",
+                 "queued",
+                 "symphony-job-rev-12",
+                 "/tmp/remote/rev-12/outputs",
+                 "/tmp/remote/rev-12/workspace"
+               )
+             )
          }
        }}
     )
@@ -1521,13 +1770,35 @@ defmodule SymphonyElixir.TemporalK3sTest do
          execution_backend: "temporal_k3s",
          workflow_id: "issue/issue-remote-state",
          workflow_run_id: "run-002",
+         workflow_mode: "phased",
+         current_phase: "execute",
+         phases:
+           normalized_remote_phase_payload(
+             "phased",
+             "execute",
+             "running",
+             "symphony-job-rev-12",
+             "/tmp/remote/rev-12/outputs",
+             "/tmp/remote/rev-12/workspace"
+           )["phases"],
          project_id: "rev-12",
          workspace_path: "/tmp/remote/rev-12/workspace",
          artifact_dir: "/tmp/remote/rev-12/outputs",
          job_name: "symphony-job-rev-12",
          payload: %{
            method: "temporal/status",
-           params: %{"status" => "running", "runId" => "run-002"}
+           params:
+             Map.merge(
+               %{"status" => "running", "runId" => "run-002"},
+               normalized_remote_phase_payload(
+                 "phased",
+                 "execute",
+                 "running",
+                 "symphony-job-rev-12",
+                 "/tmp/remote/rev-12/outputs",
+                 "/tmp/remote/rev-12/workspace"
+               )
+             )
          }
        }}
     )
@@ -1536,6 +1807,19 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert snapshot_entry.execution_backend == "temporal_k3s"
     assert snapshot_entry.workflow_id == "issue/issue-remote-state"
     assert snapshot_entry.workflow_run_id == "run-002"
+    assert snapshot_entry.workflow_mode == "phased"
+    assert snapshot_entry.current_phase == "execute"
+
+    assert snapshot_entry.phases == [
+             %{
+               "name" => "execute",
+               "status" => "running",
+               "jobName" => "symphony-job-rev-12",
+               "artifactDir" => "/tmp/remote/rev-12/outputs",
+               "workspacePath" => "/tmp/remote/rev-12/workspace"
+             }
+           ]
+
     assert snapshot_entry.project_id == "rev-12"
     assert snapshot_entry.workspace_path == "/tmp/remote/rev-12/workspace"
     assert snapshot_entry.artifact_dir == "/tmp/remote/rev-12/outputs"
@@ -1544,12 +1828,29 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert snapshot_entry.last_successful_status_poll_at == now
     assert snapshot_entry.turn_count == 1
 
+    state_payload = Presenter.state_payload(orchestrator_name, 100)
+    assert List.first(state_payload.running).workflow_mode == "phased"
+    assert List.first(state_payload.running).current_phase == "execute"
+
     assert {:ok, payload} = Presenter.issue_payload("REV-12", orchestrator_name, 100)
     assert payload.status == "running"
     assert payload.workspace.path == "/tmp/remote/rev-12/workspace"
     assert payload.running.execution_backend == "temporal_k3s"
     assert payload.running.workflow_id == "issue/issue-remote-state"
     assert payload.running.workflow_run_id == "run-002"
+    assert payload.running.workflow_mode == "phased"
+    assert payload.running.current_phase == "execute"
+
+    assert payload.running.phases == [
+             %{
+               "name" => "execute",
+               "status" => "running",
+               "jobName" => "symphony-job-rev-12",
+               "artifactDir" => "/tmp/remote/rev-12/outputs",
+               "workspacePath" => "/tmp/remote/rev-12/workspace"
+             }
+           ]
+
     assert payload.running.project_id == "rev-12"
     assert payload.running.workspace_path == "/tmp/remote/rev-12/workspace"
     assert payload.running.artifact_dir == "/tmp/remote/rev-12/outputs"
@@ -1715,14 +2016,28 @@ defmodule SymphonyElixir.TemporalK3sTest do
     refute File.exists?(workspace_path)
   end
 
-  defp assert_temporal_status_update(update, expected_status, expected_run_id) do
+  defp assert_temporal_status_update(update, expected_status, expected_run_id, expected_workflow_mode, expected_phase) do
     assert update.event == :notification
     assert update.execution_backend == "temporal_k3s"
-    assert update.workflow_id == "issue/issue-remote"
     assert update.workflow_run_id == expected_run_id
+    assert update.workflow_mode == expected_workflow_mode
+    assert update.current_phase == expected_phase
+
+    assert update.phases == [
+             %{
+               "name" => expected_phase,
+               "status" => expected_status,
+               "jobName" => update.job_name,
+               "artifactDir" => update.artifact_dir,
+               "workspacePath" => update.workspace_path
+             }
+           ]
+
     assert update.payload.method == "temporal/status"
     assert update.payload.params["status"] == expected_status
     assert update.payload.params["runId"] == expected_run_id
+    assert update.payload.params["workflow_mode"] == expected_workflow_mode
+    assert update.payload.params["current_phase"] == expected_phase
   end
 
   defp assert_temporal_connection_payload(payload) do
@@ -1763,6 +2078,22 @@ defmodule SymphonyElixir.TemporalK3sTest do
     Map.take(payload["temporal"] || %{}, ["address", "namespace"]) == %{
       "address" => "temporal.example:7233",
       "namespace" => "customer-a"
+    }
+  end
+
+  defp normalized_remote_phase_payload(workflow_mode, current_phase, status, job_name, artifact_dir, workspace_path) do
+    %{
+      "workflow_mode" => workflow_mode,
+      "current_phase" => current_phase,
+      "phases" => [
+        %{
+          "name" => current_phase,
+          "status" => status,
+          "jobName" => job_name,
+          "artifactDir" => artifact_dir,
+          "workspacePath" => workspace_path
+        }
+      ]
     }
   end
 end

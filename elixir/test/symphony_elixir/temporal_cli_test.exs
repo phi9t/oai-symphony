@@ -176,7 +176,7 @@ defmodule SymphonyElixir.TemporalCliTest do
 
     running_entry = %{execution_backend: "temporal_k3s", workspace_path: "/tmp/remote/workspace"}
     assert Execution.workspace_path("MT-1", running_entry) == "/tmp/remote/workspace"
-    assert Execution.workspace_path("MT-2") =~ "/tmp/symphony_projects/MT-2/workspace"
+    assert Execution.workspace_path("MT-2") == Path.join(Config.k3s_project_root(), "MT-2/workspace")
   end
 
   defp write_helper_script!(root, filename, body) do

@@ -50,6 +50,7 @@ temporal:
   namespace: "$TEMPORAL_NAMESPACE"
   task_queue: "symphony"
   status_poll_ms: 5000
+  workflow_mode: "phased"
 k3s:
   namespace: "symphony"
   image: "symphony/agent:latest"
@@ -80,7 +81,9 @@ The configured `temporal.address` and `temporal.namespace` apply to helper `run`
 reachability, namespace availability, worker pollers, and the target K3s namespace so blocked
 runtimes surface before dispatch instead of failing silently afterward. The configured
 `hooks.before_remove` command also runs before remote Temporal/K3s project roots are deleted, so
-cleanup stays aligned with the local backend.
+cleanup stays aligned with the local backend. `temporal.workflow_mode` defaults to `phased`; set
+it to `vanilla` when you need the original single-job remote fallback while keeping the normalized
+runtime-state payloads.
 
 You are working on an Org task `{{ issue.identifier }}`.
 
