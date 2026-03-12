@@ -321,7 +321,7 @@ defmodule SymphonyElixir.StatusDashboard do
           update_token_samples(token_samples, now_ms, total_tokens)
         }
 
-      :error ->
+      _ ->
         {
           :error,
           prune_samples(token_samples, now_ms)

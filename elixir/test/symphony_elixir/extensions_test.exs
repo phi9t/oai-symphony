@@ -7,6 +7,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Org.Adapter, as: OrgAdapter
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixirWeb.Observability.{Operator, Projection}
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -130,6 +131,14 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     def handle_call(:request_refresh, _from, state) do
       {:reply, Keyword.get(state, :refresh, :unavailable), state}
+    end
+
+    def handle_call({:request_retry, _issue_identifier}, _from, state) do
+      {:reply, Keyword.get(state, :retry, :issue_not_found), state}
+    end
+
+    def handle_call({:request_cleanup, _issue_identifier}, _from, state) do
+      {:reply, Keyword.get(state, :cleanup, :unavailable), state}
     end
   end
 
@@ -436,6 +445,167 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
+  test "observability projections shape state and issue payloads from snapshot data" do
+    now = ~U[2026-03-12 10:00:00Z]
+    workspace_root = Config.settings!().workspace.root
+
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          state: "In Progress",
+          session_id: "thread-http",
+          turn_count: 7,
+          last_codex_event: :notification,
+          last_codex_message: "rendered",
+          last_codex_timestamp: nil,
+          codex_input_tokens: 4,
+          codex_output_tokens: 8,
+          codex_total_tokens: 12,
+          started_at: ~U[2026-03-12 09:59:00Z]
+        }
+      ],
+      retrying: [
+        %{
+          issue_id: "issue-retry",
+          identifier: "MT-RETRY",
+          attempt: 2,
+          due_in_ms: 2_000,
+          error: "boom"
+        }
+      ],
+      codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
+      rate_limits: %{"primary" => %{"remaining" => 11}}
+    }
+
+    assert Projection.state_payload_from_snapshot(snapshot, now) == %{
+             generated_at: "2026-03-12T10:00:00Z",
+             counts: %{running: 1, retrying: 1},
+             running: [
+               %{
+                 issue_id: "issue-http",
+                 issue_identifier: "MT-HTTP",
+                 state: "In Progress",
+                 session_id: "thread-http",
+                 turn_count: 7,
+                 last_event: :notification,
+                 last_message: "rendered",
+                 started_at: "2026-03-12T09:59:00Z",
+                 last_event_at: nil,
+                 tokens: %{input_tokens: 4, output_tokens: 8, total_tokens: 12}
+               }
+             ],
+             retrying: [
+               %{
+                 issue_id: "issue-retry",
+                 issue_identifier: "MT-RETRY",
+                 attempt: 2,
+                 due_at: "2026-03-12T10:00:02Z",
+                 error: "boom"
+               }
+             ],
+             codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
+             rate_limits: %{"primary" => %{"remaining" => 11}}
+           }
+
+    assert {:ok,
+            %{
+              issue_identifier: "MT-HTTP",
+              issue_id: "issue-http",
+              status: "running",
+              workspace: %{path: workspace_path},
+              attempts: %{restart_count: 0, current_retry_attempt: 0},
+              running: %{
+                session_id: "thread-http",
+                turn_count: 7,
+                state: "In Progress",
+                started_at: "2026-03-12T09:59:00Z",
+                last_event: :notification,
+                last_message: "rendered",
+                last_event_at: nil,
+                tokens: %{input_tokens: 4, output_tokens: 8, total_tokens: 12}
+              },
+              retry: nil,
+              logs: %{codex_session_logs: []},
+              recent_events: [],
+              last_error: nil,
+              tracked: %{}
+            }} = Projection.issue_payload_from_snapshot("MT-HTTP", snapshot, now)
+
+    assert workspace_path == Path.join(workspace_root, "MT-HTTP")
+
+    assert {:ok,
+            %{
+              issue_identifier: "MT-RETRY",
+              issue_id: "issue-retry",
+              status: "retrying",
+              workspace: %{path: retry_workspace_path},
+              attempts: %{restart_count: 1, current_retry_attempt: 2},
+              running: nil,
+              retry: %{attempt: 2, due_at: "2026-03-12T10:00:02Z", error: "boom"},
+              logs: %{codex_session_logs: []},
+              recent_events: [],
+              last_error: "boom",
+              tracked: %{}
+            }} = Projection.issue_payload_from_snapshot("MT-RETRY", snapshot, now)
+
+    assert retry_workspace_path == Path.join(workspace_root, "MT-RETRY")
+
+    assert {:error, :issue_not_found} = Projection.issue_payload_from_snapshot("MT-MISSING", snapshot, now)
+  end
+
+  test "observability operator surface normalizes refresh, retry, and cleanup responses" do
+    orchestrator_name = Module.concat(__MODULE__, :ObservabilityOperatorOrchestrator)
+    requested_at = ~U[2026-03-12 10:00:00Z]
+    completed_at = ~U[2026-03-12 10:00:05Z]
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{queued: true, requested_at: requested_at, operations: ["poll"]},
+        retry: %{
+          queued: true,
+          issue_identifier: "MT-HTTP",
+          requested_at: requested_at,
+          source: "running",
+          operations: ["retry"]
+        },
+        cleanup: %{
+          completed: true,
+          issue_identifier: "MT-HTTP",
+          completed_at: completed_at,
+          source: "workspace",
+          operations: ["cleanup"]
+        }
+      )
+
+    assert {:ok, %{queued: true, requested_at: "2026-03-12T10:00:00Z", operations: ["poll"]}} =
+             Operator.refresh_payload(orchestrator_name)
+
+    assert {:ok,
+            %{
+              queued: true,
+              issue_identifier: "MT-HTTP",
+              requested_at: "2026-03-12T10:00:00Z",
+              source: "running",
+              operations: ["retry"]
+            }} = Operator.retry_payload(orchestrator_name, "MT-HTTP")
+
+    assert {:ok,
+            %{
+              completed: true,
+              issue_identifier: "MT-HTTP",
+              completed_at: "2026-03-12T10:00:05Z",
+              source: "workspace",
+              operations: ["cleanup"]
+            }} = Operator.cleanup_payload(orchestrator_name, "MT-HTTP")
+
+    assert {:error, :invalid_issue_identifier} = Operator.retry_payload(orchestrator_name, "   ")
+    assert {:error, :unavailable} = Operator.refresh_payload(Module.concat(__MODULE__, :MissingOperatorOrchestrator))
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -457,66 +627,18 @@ defmodule SymphonyElixir.ExtensionsTest do
     conn = get(build_conn(), "/api/v1/state")
     state_payload = json_response(conn, 200)
 
-    assert state_payload == %{
-             "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
-             "running" => [
-               %{
-                 "issue_id" => "issue-http",
-                 "issue_identifier" => "MT-HTTP",
-                 "state" => "In Progress",
-                 "session_id" => "thread-http",
-                 "turn_count" => 7,
-                 "last_event" => "notification",
-                 "last_message" => "rendered",
-                 "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
-                 "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-               }
-             ],
-             "retrying" => [
-               %{
-                 "issue_id" => "issue-retry",
-                 "issue_identifier" => "MT-RETRY",
-                 "attempt" => 2,
-                 "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
-                 "error" => "boom"
-               }
-             ],
-             "codex_totals" => %{
-               "input_tokens" => 4,
-               "output_tokens" => 8,
-               "total_tokens" => 12,
-               "seconds_running" => 42.5
-             },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
-           }
+    assert state_payload["counts"] == %{"running" => 1, "retrying" => 1}
+    assert [%{"issue_identifier" => "MT-HTTP", "last_message" => "rendered"}] = state_payload["running"]
+    assert [%{"issue_identifier" => "MT-RETRY", "error" => "boom"}] = state_payload["retrying"]
+    assert state_payload["codex_totals"]["total_tokens"] == 12
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)
 
-    assert issue_payload == %{
-             "issue_identifier" => "MT-HTTP",
-             "issue_id" => "issue-http",
-             "status" => "running",
-             "workspace" => %{"path" => Path.join(Config.settings!().workspace.root, "MT-HTTP")},
-             "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
-             "running" => %{
-               "session_id" => "thread-http",
-               "turn_count" => 7,
-               "state" => "In Progress",
-               "started_at" => issue_payload["running"]["started_at"],
-               "last_event" => "notification",
-               "last_message" => "rendered",
-               "last_event_at" => nil,
-               "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-             },
-             "retry" => nil,
-             "logs" => %{"codex_session_logs" => []},
-             "recent_events" => [],
-             "last_error" => nil,
-             "tracked" => %{}
-           }
+    assert issue_payload["issue_identifier"] == "MT-HTTP"
+    assert issue_payload["status"] == "running"
+    assert issue_payload["workspace"] == %{"path" => Path.join(Config.settings!().workspace.root, "MT-HTTP")}
+    assert issue_payload["running"]["last_message"] == "rendered"
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
 
