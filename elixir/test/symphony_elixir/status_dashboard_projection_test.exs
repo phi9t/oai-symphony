@@ -6,6 +6,7 @@ defmodule SymphonyElixir.StatusDashboardProjectionTest do
   test "snapshot_payload normalizes orchestrator snapshot data" do
     orchestrator_name = Module.concat(__MODULE__, :ProjectionOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    runtime_status = %{execution_backend: "temporal_k3s", ready: false, blockers: [%{"code" => "worker_missing"}]}
 
     on_exit(fn ->
       if Process.alive?(pid) do
@@ -18,6 +19,7 @@ defmodule SymphonyElixir.StatusDashboardProjectionTest do
         state
         | codex_totals: %{input_tokens: 3, output_tokens: 2, total_tokens: 5, seconds_running: 11},
           codex_rate_limits: %{limit_id: "gpt-5"},
+          runtime_status: runtime_status,
           retry_attempts: %{
             "issue-1" => %{attempt: 2, due_at_ms: System.monotonic_time(:millisecond) + 1_000, identifier: "MT-1"}
           }
@@ -26,6 +28,7 @@ defmodule SymphonyElixir.StatusDashboardProjectionTest do
 
     assert {:ok, snapshot} = Projection.snapshot_payload(orchestrator_name)
     assert snapshot.codex_totals.total_tokens == 5
+    assert snapshot.runtime == runtime_status
     assert snapshot.rate_limits == %{limit_id: "gpt-5"}
     assert is_list(snapshot.retrying)
   end

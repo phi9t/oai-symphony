@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Org.Client, as: OrgClient
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -85,7 +86,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join(second_workspace, "README.md")) == "changed\n"
       assert File.read!(Path.join(second_workspace, "local-progress.txt")) == "in progress\n"
       assert File.read!(Path.join([second_workspace, "deps", "cache.txt"])) == "cached deps\n"
-      assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) == "compiled artifact\n"
+
+      assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) ==
+               "compiled artifact\n"
+
       refute File.exists?(Path.join([second_workspace, "tmp", "scratch.txt"]))
     after
       File.rm_rf(workspace_root)
@@ -229,7 +233,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     try do
       target_workspace = Path.join(workspace_root, "S_1")
-      untouched_workspace = Path.join(workspace_root, "OTHER-#{System.unique_integer([:positive])}")
+
+      untouched_workspace =
+        Path.join(workspace_root, "OTHER-#{System.unique_integer([:positive])}")
 
       File.mkdir_p!(target_workspace)
       File.mkdir_p!(untouched_workspace)
@@ -256,6 +262,133 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: missing_root)
 
     assert :ok = Workspace.remove_issue_workspaces("S-2")
+  end
+
+  @tag skip:
+         if(System.find_executable("emacs"),
+           do: false,
+           else: "emacs is required for Org planning smoke"
+         )
+  test "org planning deep dives can draft proposals and create actionable top-level tasks" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-org-planning-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      org_file = Path.join(test_root, "planning.org")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(
+        org_file,
+        """
+        * Symphony Root
+        :PROPERTIES:
+        :ID: ROOT-PLANNING
+        :END:
+        ** TODO [#B] Planning parent :planning:
+        :PROPERTIES:
+        :ID: parent-id
+        :SYMPHONY_IDENTIFIER: REV-PLANNING
+        :END:
+        Parent task description.
+
+        *** Codex Workpad
+        """
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "orgmode",
+        tracker_file: org_file,
+        tracker_root_id: "ROOT-PLANNING",
+        tracker_emacsclient_command: "emacs -Q --batch",
+        tracker_state_map: %{
+          "BACKLOG" => "Backlog",
+          "TODO" => "Todo",
+          "DONE" => "Done"
+        }
+      )
+
+      assert {:ok,
+              %{
+                "content" => "### Summary\nStructural review",
+                "section" => "Deep Dive",
+                "taskId" => "REV-PLANNING"
+              }} =
+               OrgClient.deep_dive("REV-PLANNING", "### Summary\nStructural review")
+
+      assert {:ok,
+              %{
+                "content" => "### Revision Summary\nDraft follow-on work",
+                "createdTasks" => [],
+                "mode" => "draft",
+                "section" => "Planning Draft",
+                "taskId" => "REV-PLANNING"
+              }} =
+               OrgClient.deep_revision(
+                 "REV-PLANNING",
+                 "draft",
+                 "### Revision Summary\nDraft follow-on work",
+                 [
+                   %{
+                     "title" => "Draft follow-on task",
+                     "state" => "Backlog",
+                     "priority" => 2,
+                     "labels" => ["planning"],
+                     "body" => "Draft body\n\n### Acceptance Criteria\n- Decide scope\n\n### Validation / Verification\n- Review with maintainers"
+                   }
+                 ]
+               )
+
+      draft_contents = File.read!(org_file)
+      assert draft_contents =~ "*** Deep Dive"
+      assert draft_contents =~ "*** Planning Draft"
+      refute draft_contents =~ "** BACKLOG [#A] Create top-level follow-on task"
+
+      assert {:ok,
+              %{
+                "content" => "### Revision Summary\nCreate follow-on work",
+                "createdTasks" => [created_task],
+                "mode" => "create",
+                "section" => "Deep Revision",
+                "taskId" => "REV-PLANNING"
+              }} =
+               OrgClient.deep_revision(
+                 "REV-PLANNING",
+                 "create",
+                 "### Revision Summary\nCreate follow-on work",
+                 [
+                   %{
+                     "title" => "Create top-level follow-on task",
+                     "state" => "Backlog",
+                     "priority" => 1,
+                     "labels" => ["planning", "orgmode"],
+                     "body" => "Task description\n\n### Acceptance Criteria\n- Task is created at the Org root\n\n### Validation / Verification\n- Inspect the created task"
+                   }
+                 ]
+               )
+
+      assert created_task.title == "Create top-level follow-on task"
+      assert created_task.state == "Backlog"
+      assert created_task.priority == 1
+      assert created_task.labels == ["planning", "orgmode"]
+      assert created_task.description =~ "Task description"
+      assert created_task.description =~ "### Acceptance Criteria"
+      assert created_task.description =~ "### Validation / Verification"
+      assert {:ok, ""} = OrgClient.get_workpad(created_task.identifier)
+
+      org_contents = File.read!(org_file)
+      assert org_contents =~ "*** Deep Revision"
+      assert org_contents =~ "** BACKLOG [#A] Create top-level follow-on task :planning:orgmode:"
+      assert org_contents =~ ":SYMPHONY_IDENTIFIER: TASK-1"
+      assert org_contents =~ "### Acceptance Criteria\n- Task is created at the Org root"
+      assert org_contents =~ "### Validation / Verification\n- Inspect the created task"
+      assert org_contents =~ "*** Codex Workpad\n"
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "workspace cleanup ignores non-binary identifier" do
@@ -505,7 +638,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
 
     assert skipped_issue.identifier == "MT-1005"
-    assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+
+    assert skipped_issue.blocked_by == [
+             %{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}
+           ]
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -690,13 +826,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.codex_read_timeout_ms() == 5_000
     assert Config.codex_stall_timeout_ms() == 300_000
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: "codex app-server --model gpt-5.3-codex"
+    )
+
     assert Config.codex_command() == "codex app-server --model gpt-5.3-codex"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_approval_policy: "on-request",
       codex_thread_sandbox: "workspace-write",
-      codex_turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["/tmp/workspace", "/tmp/cache"]}
+      codex_turn_sandbox_policy: %{
+        type: "workspaceWrite",
+        writableRoots: ["/tmp/workspace", "/tmp/cache"]
+      }
     )
 
     assert Config.codex_approval_policy() == "on-request"
@@ -738,7 +880,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     assert Config.linear_active_states() == ["Todo", "In Progress"]
-    assert Config.linear_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+
+    assert Config.linear_terminal_states() == [
+             "Closed",
+             "Cancelled",
+             "Canceled",
+             "Duplicate",
+             "Done"
+           ]
+
     assert Config.poll_interval_ms() == 30_000
     assert Config.workspace_root() == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert Config.max_retry_backoff_ms() == 300_000
@@ -904,6 +1054,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "in progress" => 2
            }
 
+    valid_changeset =
+      {%{}, %{limits: :map}}
+      |> Changeset.cast(%{limits: %{"todo" => 2}}, [:limits])
+      |> Schema.validate_state_limits(:limits)
+
+    assert valid_changeset.errors == []
+
     changeset =
       {%{}, %{limits: :map}}
       |> Changeset.cast(%{limits: %{"" => 1, "todo" => 0}}, [:limits])
@@ -937,10 +1094,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
 
     System.delete_env(missing_workspace_env)
-    System.put_env(present_workspace_env, "/tmp/schema-present-workspace")
+    System.put_env(present_workspace_env, "/tmp/present-workspace")
     System.put_env(empty_secret_env, "")
     System.delete_env(missing_secret_env)
-    System.put_env(present_secret_env, "provided-token")
+    System.put_env(present_secret_env, "present-secret-token")
     System.put_env("LINEAR_API_KEY", "fallback-linear-token")
 
     on_exit(fn ->
@@ -960,7 +1117,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              })
 
     assert settings.tracker.api_key == nil
-    assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+
+    assert settings.workspace.root ==
+             Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
 
     assert settings.codex.approval_policy == %{
              "reject" => %{"sandbox_approval" => true}
@@ -973,7 +1132,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              })
 
     assert settings.tracker.api_key == "fallback-linear-token"
-    assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+
+    assert settings.workspace.root ==
+             Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
 
     assert {:ok, settings} =
              Schema.parse(%{
@@ -981,8 +1142,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                workspace: %{root: "$#{present_workspace_env}"}
              })
 
-    assert settings.tracker.api_key == "provided-token"
-    assert settings.workspace.root == Path.expand("/tmp/schema-present-workspace")
+    assert settings.tracker.api_key == "present-secret-token"
+    assert settings.workspace.root == Path.expand("/tmp/present-workspace")
   end
 
   test "schema resolves sandbox policies from explicit and default workspaces" do
@@ -1039,11 +1200,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert approval_policy == "never"
     assert thread_sandbox == "workspace-write"
     assert turn_sandbox_policy["type"] == "workspaceWrite"
-    assert turn_sandbox_policy["writableRoots"] == ["/mnt/data_infra/workspace/symphony/.symphony/workspaces"]
+
+    assert turn_sandbox_policy["writableRoots"] == [
+             "/mnt/data_infra/workspace/symphony/.symphony/workspaces"
+           ]
+
     assert turn_sandbox_policy["networkAccess"] == true
 
-    assert prompt =~ "Use the repo-local `commit`, `push`, and `land` skills before ending a successful task."
-    assert prompt =~ "Successful tasks must be committed, pushed, landed, and then moved to `Done`."
+    assert prompt =~
+             "Use the repo-local `commit`, `push`, and `land` skills before ending a successful task."
+
+    assert prompt =~
+             "Successful tasks must be committed, pushed, landed, and then moved to `Done`."
 
     assert prompt =~
              "Once the merge is complete, record the PR URL and merge commit in the workpad and set the task state to `Done`."
@@ -1209,7 +1377,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       read_only_settings = %{
         settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}}
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}
+          }
       }
 
       assert {:ok, %{"type" => "readOnly", "networkAccess" => true}} =
@@ -1217,7 +1388,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       future_settings = %{
         settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}}
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}
+          }
       }
 
       assert {:ok, %{"type" => "futureSandbox", "nested" => %{"flag" => true}}} =

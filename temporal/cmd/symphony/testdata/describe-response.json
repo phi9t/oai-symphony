@@ -1,0 +1,17 @@
+{
+  "workflowId": "issue/alpha",
+  "runId": "run-00123456",
+  "status": "succeeded",
+  "workflow_mode": "phased",
+  "current_phase": "execute",
+  "phases": [
+    {
+      "name": "execute",
+      "status": "succeeded"
+    }
+  ],
+  "readiness": {
+    "state": "ready",
+    "reason": "workflow-succeeded"
+  }
+}

@@ -14,6 +14,7 @@ defmodule SymphonyElixir.StatusDashboard.Projection do
              running: running,
              retrying: retrying,
              codex_totals: codex_totals,
+             runtime: Map.get(snapshot, :runtime),
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }}

@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   require Logger
 
-  alias SymphonyElixir.{Config, PromptBuilder, TemporalCli, Tracker}
+  alias SymphonyElixir.{Config, PromptBuilder, TemporalCli, Tracker, Workspace}
   alias SymphonyElixir.Org.Adapter
   alias SymphonyElixir.Tracker.Issue
 
@@ -14,6 +14,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   @prompt_file "prompt.md"
   @result_file "run-result.json"
   @issue_file "issue.json"
+  @default_phased_phase "execute"
+  @default_vanilla_phase "run"
   @default_workpad """
   ### Environment
   `<host>:<abs-workdir>@<unknown-sha>`
@@ -61,7 +63,12 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
     case workflow_id do
       workflow_id when is_binary(workflow_id) ->
-        case TemporalCli.cancel(temporal_request_payload(workflow_id), cli_opts(opts)) do
+        case TemporalCli.cancel(
+               temporal_request_payload(workflow_id,
+                 workflow_mode: Map.get(running_entry, :workflow_mode) || Config.temporal_workflow_mode()
+               ),
+               cli_opts(opts)
+             ) do
           {:ok, _payload} -> :ok
           {:error, reason} -> {:error, reason}
         end
@@ -77,12 +84,23 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   def remove_issue_project(identifier) when is_binary(identifier) do
     identifier
     |> project_roots_for_identifier()
-    |> Enum.each(&File.rm_rf/1)
+    |> Enum.each(&remove_project_root(&1, identifier))
 
     :ok
   end
 
   def remove_issue_project(_identifier), do: :ok
+
+  @spec runtime_status(keyword()) :: map()
+  def runtime_status(opts \\ []) do
+    case TemporalCli.readiness(runtime_status_payload(), cli_opts(opts)) do
+      {:ok, %{} = payload} ->
+        normalize_runtime_status(payload)
+
+      {:error, reason} ->
+        helper_failure_runtime_status(reason)
+    end
+  end
 
   @spec project_workspace_path(String.t()) :: Path.t()
   def project_workspace_path(identifier) when is_binary(identifier) do
@@ -94,6 +112,19 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp cli_opts(opts) do
     opts
     |> Keyword.take([:runner, :command])
+  end
+
+  defp runtime_status_payload do
+    %{
+      "temporal" => %{
+        "address" => Config.temporal_address(),
+        "namespace" => Config.temporal_namespace(),
+        "taskQueue" => Config.temporal_task_queue()
+      },
+      "k3s" => %{
+        "namespace" => Config.k3s_namespace()
+      }
+    }
   end
 
   defp prepare_project!(issue, opts) do
@@ -137,7 +168,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp fetch_workpad(%Issue{id: issue_id}) when is_binary(issue_id) do
     case Config.tracker_kind() do
       "orgmode" -> fetch_org_workpad(issue_id)
-      _other -> @default_workpad
+      _ -> @default_workpad
     end
   end
 
@@ -185,6 +216,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       "codex" => %{
         "command" => Config.codex_command()
       },
+      "workflowMode" => Config.temporal_workflow_mode(),
       "temporal" => Map.put(temporal_connection_payload(), "taskQueue", Config.temporal_task_queue()),
       "k3s" => %{
         "namespace" => Config.k3s_namespace(),
@@ -225,7 +257,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     Process.sleep(poll_ms)
 
     case TemporalCli.status(
-           temporal_request_payload(run_state.workflow_id, run_state.run_id),
+           temporal_request_payload(run_state.workflow_id,
+             run_id: run_state.run_id,
+             workflow_mode: run_state.workflow_mode
+           ),
            cli_opts
          ) do
       {:ok, status} ->
@@ -272,6 +307,18 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       workflow_id: string_value(Map.get(run, "workflowId")),
       run_id: string_value(Map.get(run, "runId")),
       status: normalized_workflow_status(run),
+      workflow_mode: normalized_workflow_mode(run),
+      current_phase: normalized_current_phase(run, normalized_workflow_mode(run)),
+      phases:
+        normalized_phases(
+          run,
+          normalized_workflow_mode(run),
+          normalized_current_phase(run, normalized_workflow_mode(run)),
+          normalized_workflow_status(run),
+          string_value(Map.get(run, "jobName")),
+          string_value(Map.get(run, "artifactDir")) || project.outputs_path,
+          string_value(Map.get(run, "workspacePath")) || project.workspace_path
+        ),
       job_name: string_value(Map.get(run, "jobName")),
       artifact_dir: string_value(Map.get(run, "artifactDir")) || project.outputs_path,
       workspace_path: string_value(Map.get(run, "workspacePath")) || project.workspace_path,
@@ -281,12 +328,31 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp update_run_state(run_state, status) do
+    workflow_mode = normalized_workflow_mode(status, run_state.workflow_mode)
+    current_phase = normalized_current_phase(status, workflow_mode, run_state.current_phase)
+    normalized_status = normalized_workflow_status(status)
+    job_name = string_value(Map.get(status, "jobName")) || run_state.job_name
+    artifact_dir = string_value(Map.get(status, "artifactDir")) || run_state.artifact_dir
+    workspace_path = string_value(Map.get(status, "workspacePath")) || run_state.workspace_path
+
     %{
       run_state
-      | status: normalized_workflow_status(status),
-        job_name: string_value(Map.get(status, "jobName")) || run_state.job_name,
-        artifact_dir: string_value(Map.get(status, "artifactDir")) || run_state.artifact_dir,
-        workspace_path: string_value(Map.get(status, "workspacePath")) || run_state.workspace_path,
+      | status: normalized_status,
+        workflow_mode: workflow_mode,
+        current_phase: current_phase,
+        phases:
+          normalized_phases(
+            status,
+            workflow_mode,
+            current_phase,
+            normalized_status,
+            job_name,
+            artifact_dir,
+            workspace_path
+          ),
+        job_name: job_name,
+        artifact_dir: artifact_dir,
+        workspace_path: workspace_path,
         run_id: string_value(Map.get(status, "runId")) || run_state.run_id
     }
   end
@@ -302,8 +368,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
     case {normalized_workflow_status(status), run_result} do
       {status_name, %{} = result} when status_name in ["succeeded", "failed", "cancelled"] ->
-        case allowed_target_state?(Map.get(result, "targetState")) or
-               Map.has_key?(result, "needsContinuation") do
+        case allowed_target_state?(target_state_from_run_result(result)) do
           true ->
             :ok
 
@@ -334,11 +399,9 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
                   "Temporal/K3s failed to sync Org workpad for #{issue_context(issue)}: #{inspect(reason)}"
         end
 
-      _other ->
+      _ ->
         :ok
     end
-
-    :ok
   end
 
   defp maybe_replace_org_workpad(_issue, _content), do: :ok
@@ -351,11 +414,9 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
         |> target_state_from_run_result()
         |> maybe_sync_org_state!(issue, issue_id)
 
-      _other ->
+      _ ->
         :ok
     end
-
-    :ok
   end
 
   defp maybe_apply_run_result_state(_issue, _result), do: :ok
@@ -401,8 +462,6 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     state in ["In Progress", "Human Review", "Rework", "Done"]
   end
 
-  defp allowed_target_state?(_state), do: false
-
   defp emit_session_started(recipient, issue, project, run) when is_pid(recipient) do
     send(recipient, {:codex_worker_update, issue.id, session_started_payload(project, run)})
   end
@@ -417,6 +476,18 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       execution_backend: "temporal_k3s",
       workflow_id: Map.get(run, "workflowId"),
       workflow_run_id: Map.get(run, "runId"),
+      workflow_mode: normalized_workflow_mode(run),
+      current_phase: normalized_current_phase(run, normalized_workflow_mode(run)),
+      phases:
+        normalized_phases(
+          run,
+          normalized_workflow_mode(run),
+          normalized_current_phase(run, normalized_workflow_mode(run)),
+          normalized_workflow_status(run),
+          Map.get(run, "jobName"),
+          Map.get(run, "artifactDir") || project.outputs_path,
+          Map.get(run, "workspacePath") || project.workspace_path
+        ),
       project_id: Map.get(run, "projectId") || project.project_id,
       workspace_path: Map.get(run, "workspacePath") || project.workspace_path,
       artifact_dir: Map.get(run, "artifactDir") || project.outputs_path,
@@ -442,6 +513,9 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
       execution_backend: "temporal_k3s",
       workflow_id: run_state.workflow_id,
       workflow_run_id: run_state.run_id,
+      workflow_mode: run_state.workflow_mode,
+      current_phase: run_state.current_phase,
+      phases: run_state.phases,
       project_id: run_state.project_id,
       workspace_path: run_state.workspace_path,
       artifact_dir: run_state.artifact_dir,
@@ -510,12 +584,19 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     entry == base_project_id || String.starts_with?(entry, base_project_id <> "-attempt-")
   end
 
-  defp temporal_request_payload(workflow_id, run_id \\ nil) when is_binary(workflow_id) do
+  defp remove_project_root(project_root, identifier)
+       when is_binary(project_root) and is_binary(identifier) do
+    Workspace.run_before_remove_hook(Path.join(project_root, "workspace"), identifier)
+    File.rm_rf(project_root)
+  end
+
+  defp temporal_request_payload(workflow_id, opts) when is_binary(workflow_id) and is_list(opts) do
     %{
       "workflowId" => workflow_id,
       "temporal" => temporal_connection_payload()
     }
-    |> maybe_put_run_id(run_id)
+    |> maybe_put_run_id(Keyword.get(opts, :run_id))
+    |> maybe_put_workflow_mode(Keyword.get(opts, :workflow_mode))
   end
 
   defp temporal_connection_payload do
@@ -544,26 +625,134 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp maybe_put_run_id(payload, _run_id), do: payload
 
+  defp maybe_put_workflow_mode(payload, workflow_mode) when is_binary(workflow_mode) do
+    Map.put(payload, "workflowMode", workflow_mode)
+  end
+
+  defp maybe_put_workflow_mode(payload, _workflow_mode), do: payload
+
   defp session_id(run) do
     workflow_id = Map.get(run, "workflowId") || "issue/unknown"
     run_id = Map.get(run, "runId") || "pending"
     "#{workflow_id}/#{run_id}"
   end
 
+  defp normalized_workflow_mode(%{} = payload, fallback \\ Config.temporal_workflow_mode()) do
+    payload
+    |> remote_workflow_mode_value()
+    |> normalized_workflow_mode_value(fallback)
+  end
+
+  defp normalized_workflow_mode_value(value, fallback) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "vanilla" -> "vanilla"
+      "phased" -> "phased"
+      _ -> normalized_workflow_mode_fallback(fallback)
+    end
+  end
+
+  defp normalized_workflow_mode_value(_value, fallback), do: normalized_workflow_mode_fallback(fallback)
+
+  defp normalized_workflow_mode_fallback(fallback) when is_binary(fallback) do
+    case String.trim(fallback) |> String.downcase() do
+      "vanilla" -> "vanilla"
+      _ -> "phased"
+    end
+  end
+
+  defp normalized_current_phase(%{} = payload, workflow_mode, fallback \\ nil) do
+    payload
+    |> remote_current_phase_value()
+    |> normalized_current_phase_value(workflow_mode, fallback)
+  end
+
+  defp normalized_current_phase_value(value, workflow_mode, _fallback) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "" -> default_current_phase(workflow_mode)
+      normalized -> normalized
+    end
+  end
+
+  defp normalized_current_phase_value(_value, workflow_mode, fallback) when is_binary(fallback) do
+    normalized_current_phase_value(fallback, workflow_mode, nil)
+  end
+
+  defp normalized_current_phase_value(_value, workflow_mode, _fallback) do
+    default_current_phase(workflow_mode)
+  end
+
+  defp normalized_phases(payload, workflow_mode, current_phase, status, job_name, artifact_dir, workspace_path)
+       when is_map(payload) do
+    case Map.get(payload, "phases") do
+      phases when is_list(phases) ->
+        phases
+        |> Enum.map(&normalize_phase_entry(&1, current_phase, status, job_name, artifact_dir, workspace_path))
+        |> Enum.reject(&is_nil/1)
+        |> case do
+          [] -> [default_phase_entry(workflow_mode, current_phase, status, job_name, artifact_dir, workspace_path)]
+          normalized -> normalized
+        end
+
+      _ ->
+        [default_phase_entry(workflow_mode, current_phase, status, job_name, artifact_dir, workspace_path)]
+    end
+  end
+
+  defp normalize_phase_entry(entry, current_phase, status, job_name, artifact_dir, workspace_path)
+       when is_map(entry) do
+    phase_name =
+      entry
+      |> Map.get("name")
+      |> string_value()
+      |> case do
+        nil -> current_phase
+        value -> String.downcase(value)
+      end
+
+    phase_status =
+      entry
+      |> Map.get("status")
+      |> string_value()
+      |> case do
+        nil -> if phase_name == current_phase, do: status, else: "queued"
+        value -> normalize_status_value(value)
+      end
+
+    %{}
+    |> Map.put("name", phase_name)
+    |> Map.put("status", phase_status)
+    |> maybe_put_string("jobName", Map.get(entry, "jobName") || job_name)
+    |> maybe_put_string("artifactDir", Map.get(entry, "artifactDir") || artifact_dir)
+    |> maybe_put_string("workspacePath", Map.get(entry, "workspacePath") || workspace_path)
+  end
+
+  defp normalize_phase_entry(_entry, _current_phase, _status, _job_name, _artifact_dir, _workspace_path),
+    do: nil
+
+  defp default_phase_entry(_workflow_mode, current_phase, status, job_name, artifact_dir, workspace_path) do
+    %{}
+    |> Map.put("name", current_phase)
+    |> Map.put("status", status)
+    |> maybe_put_string("jobName", job_name)
+    |> maybe_put_string("artifactDir", artifact_dir)
+    |> maybe_put_string("workspacePath", workspace_path)
+  end
+
+  defp remote_workflow_mode_value(payload) do
+    Map.get(payload, "workflow_mode") || Map.get(payload, "workflowMode")
+  end
+
+  defp remote_current_phase_value(payload) do
+    Map.get(payload, "current_phase") || Map.get(payload, "currentPhase")
+  end
+
+  defp default_current_phase("vanilla"), do: @default_vanilla_phase
+  defp default_current_phase(_workflow_mode), do: @default_phased_phase
+
   defp normalized_workflow_status(%{} = payload) do
     payload
     |> Map.get("status", "running")
-    |> to_string()
-    |> String.trim()
-    |> String.downcase()
-    |> case do
-      "completed" -> "succeeded"
-      "success" -> "succeeded"
-      "terminated" -> "cancelled"
-      "canceled" -> "cancelled"
-      "" -> "running"
-      other -> other
-    end
+    |> normalize_status_value()
   end
 
   defp read_optional_file(path) when is_binary(path) do
@@ -608,6 +797,25 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp string_value(_value), do: nil
 
+  defp maybe_put_string(map, _key, nil), do: map
+  defp maybe_put_string(map, key, value) when is_binary(value), do: Map.put(map, key, value)
+  defp maybe_put_string(map, key, value), do: maybe_put_string(map, key, string_value(value))
+
+  defp normalize_status_value(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> String.downcase()
+    |> case do
+      "completed" -> "succeeded"
+      "success" -> "succeeded"
+      "terminated" -> "cancelled"
+      "canceled" -> "cancelled"
+      "" -> "running"
+      other -> other
+    end
+  end
+
   defp monotonic_now_ms do
     System.monotonic_time(:millisecond)
   end
@@ -617,6 +825,79 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp truthy?("TRUE"), do: true
   defp truthy?(1), do: true
   defp truthy?(_value), do: false
+
+  defp normalize_runtime_status(payload) when is_map(payload) do
+    blockers = normalize_runtime_blockers(map_value(payload, "blockers"))
+
+    %{
+      execution_backend: "temporal_k3s",
+      ready: truthy?(map_value(payload, "ready")) and blockers == [],
+      blockers: blockers,
+      temporal: normalize_runtime_section(map_value(payload, "temporal")),
+      k3s: normalize_runtime_section(map_value(payload, "k3s")),
+      checked_at: DateTime.utc_now()
+    }
+  end
+
+  defp helper_failure_runtime_status(reason) do
+    %{
+      execution_backend: "temporal_k3s",
+      ready: false,
+      blockers: [
+        %{
+          "code" => "temporal_helper_failed",
+          "message" => format_runtime_reason(reason)
+        }
+      ],
+      temporal: nil,
+      k3s: nil,
+      checked_at: DateTime.utc_now()
+    }
+  end
+
+  defp normalize_runtime_blockers(blockers) when is_list(blockers) do
+    blockers
+    |> Enum.map(&normalize_runtime_blocker/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_runtime_blockers(_blockers), do: []
+
+  defp normalize_runtime_blocker(blocker) when is_map(blocker) do
+    case {map_value(blocker, "code"), map_value(blocker, "message")} do
+      {code, message} when is_binary(code) and is_binary(message) ->
+        %{"code" => code, "message" => message}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp normalize_runtime_blocker(_blocker), do: nil
+
+  defp normalize_runtime_section(section) when is_map(section), do: section
+  defp normalize_runtime_section(_section), do: nil
+
+  defp map_value(map, key) when is_map(map) do
+    Enum.find_value(map, fn
+      {^key, value} ->
+        value
+
+      {entry_key, value} ->
+        if to_string(entry_key) == key, do: value
+    end)
+  end
+
+  defp format_runtime_reason({:temporal_helper_failed, status, output})
+       when is_integer(status) and is_binary(output) do
+    "Temporal/K3s readiness helper failed with exit #{status}: #{output}"
+  end
+
+  defp format_runtime_reason({:temporal_helper_failed, message}) when is_binary(message) do
+    "Temporal/K3s readiness helper failed: #{message}"
+  end
+
+  defp format_runtime_reason(reason), do: "Temporal/K3s readiness probe failed: #{inspect(reason)}"
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"

@@ -142,11 +142,12 @@ What each command does:
 
 - `up` starts a local Temporal dev server, starts a single-node K3s server in Docker, imports the
   repo-owned smoke image, and launches the Temporal worker with the right K3s control-plane wiring.
-- `status` acts as the health check: it verifies Temporal, K3s, the worker, and the Symphony
-  namespace are all ready.
+- `status` acts as the health check: it verifies the repo-managed Temporal container, K3s control
+  plane, worker, and Symphony namespace are all ready, and it reports the failing plane explicitly
+  when they are not.
 - `smoke` runs an end-to-end Temporal workflow that fans out into a K3s job, clones the repo in the
-  remote workspace, and writes the required `.symphony/workpad.md` plus `.symphony/run-result.json`
-  artifacts.
+  remote workspace, validates the required `.symphony/workpad.md` plus `.symphony/run-result.json`
+  artifacts as JSON, and preserves an evidence bundle under `.symphony/dev/projects/smoke-*/evidence/`.
 - `down` stops the worker and removes the local Temporal plus K3s containers.
 
 Before starting Symphony itself, export the workflow-facing environment that matches the dev stack:
@@ -156,14 +157,26 @@ eval "$(./dev/temporal-k3s env)"
 ```
 
 This exports `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`,
-`SYMPHONY_K3S_PROJECT_ROOT`, and `SYMPHONY_K3S_SHARED_CACHE_ROOT`.
+`SYMPHONY_K3S_PROJECT_ROOT`, and `SYMPHONY_K3S_SHARED_CACHE_ROOT`. If the repo-managed Temporal
+container is already running on a non-default published port, `env` resolves that live port instead
+of re-exporting a stale default.
+
+The repo-managed stack defaults to `127.0.0.1:17233` instead of `127.0.0.1:7233` so it does not
+silently attach to an unrelated Temporal dev server that is already using the conventional port.
 
 Notes:
 
 - The smoke workflow uses the repo-owned `symphony/smoke-agent:dev` image built by
   `./dev/temporal-k3s up`.
+- Treat `./dev/temporal-k3s smoke` as the minimum operator-run system proof for the repo-managed
+  remote runtime. It is the fastest trustworthy way to prove readiness, workflow submission, worker
+  execution, K3s job completion, artifact creation, and retained evidence together.
 - Real agent runs still need `k3s.image` to point at an image that contains `bash`, `git`, and a
   working implementation of your configured `codex.command`.
+- The equivalent repo-owned workflow to promote next is `./.symphony/temporal-self-land-workflow.md`.
+  It reads `SYMPHONY_K3S_IMAGE`, and repeated automation should wait for a real
+  `symphony/agent:latest` image plus a self-hosted Docker/K3s runner instead of assuming
+  GitHub-hosted runners can carry this stack.
 - The default Temporal helper command is now `./temporal/bin/symphony`, which works correctly from
   the repository root.
 
@@ -197,6 +210,7 @@ execution:
   kind: temporal_k3s
 temporal:
   helper_command: "./temporal/bin/symphony"
+  workflow_mode: "phased"
 repository:
   origin_url: "https://github.com/your-org/your-repo.git"
 codex:
@@ -212,6 +226,8 @@ Notes:
 - If a value is missing, defaults are used.
 - `execution.kind: temporal_k3s` enables the new remote backend; `local` keeps the original host-local runner.
 - The remote backend requires a Temporal helper command plus `repository.origin_url`.
+- `temporal.workflow_mode` accepts `phased` or `vanilla`; `phased` is the default and `vanilla`
+  keeps the original single-job remote path available as a fallback.
 - `temporal.address` and `temporal.namespace` are forwarded to helper `run`, `status`, `cancel`,
   and `describe` requests, so remote lifecycle operations stay on the same Temporal cluster.
 - When Symphony retries a remote attempt, it generates a fresh `workflowId`, `projectId`, and K3s

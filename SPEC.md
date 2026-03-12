@@ -1107,24 +1107,44 @@ Optional client-side tool extension:
 
 `org_task` extension contract:
 
-- Purpose: read or update the current Org mode task and its `Codex Workpad` child heading using
-  Symphony's configured tracker access.
+- Purpose: read or update the current Org mode task, capture deep-dive analysis, and draft or
+  create follow-on Org tasks using Symphony's configured tracker access.
 - Availability: only meaningful when `tracker.kind == "orgmode"` and valid Org tracker config is
   present.
 - Preferred input shape:
 
   ```json
   {
-    "action": "get_task | set_state | get_workpad | replace_workpad",
+    "action": "get_task | set_state | get_workpad | replace_workpad | deep_dive | deep_revision",
     "taskId": "optional current task override",
     "state": "required for set_state",
-    "content": "required for replace_workpad"
+    "content": "required for replace_workpad",
+    "summary": "required for deep_dive and deep_revision",
+    "details": "optional narrative for deep_dive",
+    "mode": "required for deep_revision: create | draft",
+    "tasks": [
+      {
+        "title": "required task title",
+        "description": "required task description",
+        "acceptanceCriteria": ["required acceptance criteria"],
+        "priority": 1,
+        "validation": ["required validation steps"]
+      }
+    ]
   }
   ```
 
 - `taskId` may be omitted when the session already identifies the current task.
 - `set_state` must apply the configured `tracker.state_map`.
 - `replace_workpad` must replace only the workpad section content, not unrelated task content.
+- `deep_dive` must record structured analysis on the current task, for example summary, findings,
+  risks, open questions, recommendations, and validation notes.
+- `deep_revision` must always record the proposal on the current task.
+  - `mode: "draft"` records the proposed work for later human discussion.
+  - `mode: "create"` additionally creates new top-level tasks under the configured Org root.
+- Each created or drafted `deep_revision` task must be actionable on its own, including
+  description, acceptance criteria, priority, and validation steps.
+- Tasks created through `deep_revision` should start with an empty `Codex Workpad` child heading.
 
 Illustrative responses (equivalent payload shapes are acceptable if they preserve the same outcome):
 

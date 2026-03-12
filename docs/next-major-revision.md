@@ -2,45 +2,57 @@
 
 ## Objective
 
-The next major revision should make Symphony bootstrapable, self-hosting, and operationally credible on a fresh machine. The first milestone is not new product surface area; it is proving that Symphony can plan, launch, monitor, and repair its own work through the orchestrator with minimal manual intervention.
+The next major revision should turn the current bootstrap into a maintainable control plane. The repository can now self-host and run through Org-backed workflows, but the next phase needs cleaner module boundaries, better test leverage, a firmer cross-language contract, and a planning lane that can expand the queue safely.
 
 ## Why This Revision
 
-The current repo has the core pieces for Org tracking, local execution, and a Temporal/K3s path, but the operator story is still weak:
+The main structural pressure points are now visible in the codebase:
 
-- there is no turnkey bootstrap for an Org-backed first run
-- the remote backend depends on external Temporal and Kubernetes infrastructure that is not repo-managed
-- local and remote execution follow different completion contracts
-- the repo lacks an end-to-end self-hosting smoke path that catches orchestration regressions early
+- several Elixir modules are too large and mix unrelated concerns
+- the test suite is concentrated in a few giant files that are hard to extend safely
+- Elixir, Go, shell, and agent artifacts still share implicit JSON contracts
+- the `temporal_k3s` backend exists, but the repo still relies on the local runner for actual unattended task execution
+- operator-facing dashboard logic is tightly coupled to orchestrator state shaping
+- planning is possible through Org, but not yet operationalized as a first-class workflow
 
 ## Revision Tracks
 
-### 1. Self-Hosting Bootstrap
+### 1. Reliability and Recovery
 
-Ship a repo-owned workflow, tracker seed, and smoke command that let Symphony claim an Org task and complete a supervised first run locally.
+Build reusable cross-backend recovery coverage for restart, cancellation, malformed output, stuck turns, and workspace cleanup.
 
-### 2. Remote Backend Bring-Up
+### 2. Temporal/K3s Runtime Adoption
 
-Turn the Temporal/K3s path into a deployable developer workflow with repeatable startup, health checks, and cleanup. The target is a documented `dev up` path, not an operator guessing which services must already exist.
+Make `temporal_k3s` the preferred runtime for real task execution on supported hosts, with clear readiness checks, worker/runtime observability, and at least one end-to-end smoke or self-landing path.
 
-### 3. Durable Control Plane Semantics
+### 3. Operator Projections and Controls
 
-Align local and remote execution around one task lifecycle, one workpad model, and explicit continuation rules. Remove avoidable branching between `org_task` and artifact-driven flows where possible.
+Split dashboard projection and operator controls away from raw orchestrator state so the Phoenix surface can evolve cleanly.
 
-### 4. Reliability and Recovery
+### 4. Elixir Control-Plane Boundaries
 
-Add end-to-end tests for restarts, cancellations, stuck runs, and malformed agent outputs. A restart should preserve enough state to reconcile safely instead of forcing manual cleanup.
+Decompose `Config`, `Orchestrator`, `StatusDashboard`, `Codex.AppServer`, and `Codex.DynamicTool` into bounded collaborators with stable public facades.
 
-### 5. Operator Visibility
+### 5. Test Harness Structure
 
-Expand the dashboard and logs so an engineer can answer four questions quickly: what is running, why it is blocked, what it changed, and what should happen next.
+Replace giant test files with reusable scenario builders and fixtures that match the new module boundaries.
+
+### 6. Cross-Language Contracts
+
+Version the execution contract between Elixir, Go, K3s launchers, and `.symphony` artifacts so compatibility is explicit and testable.
+
+### 7. Planning Workflow
+
+Operationalize deep-dive and deep-revision runs so Symphony can grow the Org queue itself when the next work is clear.
 
 ## Execution Order
 
-1. `REV-1`: Bootstrap a repeatable self-hosted local run.
-2. `REV-2`: Make Temporal/K3s bring-up reproducible.
-3. `REV-3`: Unify lifecycle and tracker semantics.
-4. `REV-4`: Add failure-injection and end-to-end coverage.
-5. `REV-5`: Improve dashboard and operator controls.
+1. `REV-4`: Add cross-backend recovery and failure-injection coverage.
+2. `REV-16`: Make Temporal/K3s the preferred task execution runtime.
+3. `REV-5`: Separate operator projections and control points.
+4. `REV-12`: Split oversized Elixir control-plane modules.
+5. `REV-13`: Reorganize the test harness around reusable scenarios.
+6. `REV-14`: Version the cross-language execution contract.
+7. `REV-15`: Operationalize deep-dive and deep-revision planning runs.
 
 The Org tracker in `.symphony/revision-plan.org` is the execution source of truth for this revision.

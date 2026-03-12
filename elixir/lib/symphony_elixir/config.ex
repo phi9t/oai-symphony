@@ -58,6 +58,7 @@ defmodule SymphonyElixir.Config do
   @default_temporal_namespace "default"
   @default_temporal_task_queue "symphony"
   @default_temporal_status_poll_ms 5_000
+  @default_temporal_workflow_mode "phased"
   @default_k3s_namespace "symphony"
   @default_k3s_image "symphony/agent:latest"
   @default_k3s_project_root Path.join(System.tmp_dir!(), "symphony_projects")
@@ -133,10 +134,17 @@ defmodule SymphonyElixir.Config do
                                  ],
                                  address: [type: :string, default: @default_temporal_address],
                                  namespace: [type: :string, default: @default_temporal_namespace],
-                                 task_queue: [type: :string, default: @default_temporal_task_queue],
+                                 task_queue: [
+                                   type: :string,
+                                   default: @default_temporal_task_queue
+                                 ],
                                  status_poll_ms: [
                                    type: :pos_integer,
                                    default: @default_temporal_status_poll_ms
+                                 ],
+                                 workflow_mode: [
+                                   type: {:in, ["phased", "vanilla"]},
+                                   default: @default_temporal_workflow_mode
                                  ]
                                ]
                              ],
@@ -174,7 +182,10 @@ defmodule SymphonyElixir.Config do
                                type: :map,
                                default: %{},
                                keys: [
-                                 root: [type: {:or, [:string, nil]}, default: @default_workspace_root]
+                                 root: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_workspace_root
+                                 ]
                                ]
                              ],
                              agent: [
@@ -226,7 +237,10 @@ defmodule SymphonyElixir.Config do
                                  before_run: [type: {:or, [:string, nil]}, default: nil],
                                  after_run: [type: {:or, [:string, nil]}, default: nil],
                                  before_remove: [type: {:or, [:string, nil]}, default: nil],
-                                 timeout_ms: [type: :pos_integer, default: @default_hook_timeout_ms]
+                                 timeout_ms: [
+                                   type: :pos_integer,
+                                   default: @default_hook_timeout_ms
+                                 ]
                                ]
                              ],
                              observability: [
@@ -404,6 +418,11 @@ defmodule SymphonyElixir.Config do
   @spec temporal_status_poll_ms() :: pos_integer()
   def temporal_status_poll_ms do
     get_in(validated_workflow_options(), [:temporal, :status_poll_ms])
+  end
+
+  @spec temporal_workflow_mode() :: String.t()
+  def temporal_workflow_mode do
+    get_in(validated_workflow_options(), [:temporal, :workflow_mode])
   end
 
   @spec k3s_namespace() :: String.t()
@@ -599,6 +618,7 @@ defmodule SymphonyElixir.Config do
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, _settings} <- settings(),
+         :ok <- require_validated_workflow_options(),
          :ok <- require_tracker_kind(),
          :ok <- require_execution_kind(),
          :ok <- require_linear_token(),
@@ -614,7 +634,8 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec codex_runtime_settings(Path.t() | nil) :: {:ok, codex_runtime_settings()} | {:error, term()}
+  @spec codex_runtime_settings(Path.t() | nil) ::
+          {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil) do
     with {:ok, settings} <- settings() do
       with {:ok, turn_sandbox_policy} <-
@@ -774,6 +795,16 @@ defmodule SymphonyElixir.Config do
     |> NimbleOptions.validate!(@workflow_options_schema)
   end
 
+  defp require_validated_workflow_options do
+    case NimbleOptions.validate(extract_workflow_options(workflow_config()), @workflow_options_schema) do
+      {:ok, _options} ->
+        :ok
+
+      {:error, error} ->
+        {:error, {:invalid_workflow_config, Exception.message(error)}}
+    end
+  end
+
   defp extract_workflow_options(config) do
     %{
       tracker: extract_tracker_options(section_map(config, "tracker")),
@@ -793,14 +824,20 @@ defmodule SymphonyElixir.Config do
 
   defp extract_tracker_options(section) do
     %{}
-    |> put_if_present(:kind, normalize_tracker_kind(scalar_string_value(Map.get(section, "kind"))))
+    |> put_if_present(
+      :kind,
+      normalize_tracker_kind(scalar_string_value(Map.get(section, "kind")))
+    )
     |> put_if_present(:endpoint, scalar_string_value(Map.get(section, "endpoint")))
     |> put_if_present(:api_key, binary_value(Map.get(section, "api_key"), allow_empty: true))
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
     |> put_if_present(:assignee, scalar_string_value(Map.get(section, "assignee")))
     |> put_if_present(:file, binary_value(Map.get(section, "file")))
     |> put_if_present(:root_id, scalar_string_value(Map.get(section, "root_id")))
-    |> put_if_present(:emacsclient_command, command_value(Map.get(section, "emacsclient_command")))
+    |> put_if_present(
+      :emacsclient_command,
+      command_value(Map.get(section, "emacsclient_command"))
+    )
     |> put_if_present(:state_map, string_map_value(Map.get(section, "state_map")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
@@ -813,7 +850,10 @@ defmodule SymphonyElixir.Config do
 
   defp extract_execution_options(section) do
     %{}
-    |> put_if_present(:kind, normalize_execution_kind(scalar_string_value(Map.get(section, "kind"))))
+    |> put_if_present(
+      :kind,
+      normalize_execution_kind(scalar_string_value(Map.get(section, "kind")))
+    )
   end
 
   defp extract_temporal_options(section) do
@@ -823,6 +863,10 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:namespace, scalar_string_value(Map.get(section, "namespace")))
     |> put_if_present(:task_queue, scalar_string_value(Map.get(section, "task_queue")))
     |> put_if_present(:status_poll_ms, positive_integer_value(Map.get(section, "status_poll_ms")))
+    |> put_if_present(
+      :workflow_mode,
+      normalize_temporal_workflow_mode(scalar_string_value(Map.get(section, "workflow_mode")))
+    )
   end
 
   defp extract_k3s_options(section) do
@@ -837,7 +881,10 @@ defmodule SymphonyElixir.Config do
     )
     |> put_if_present(:default_cpu, scalar_string_value(Map.get(section, "default_cpu")))
     |> put_if_present(:default_memory, scalar_string_value(Map.get(section, "default_memory")))
-    |> put_if_present(:default_gpu_count, non_negative_integer_value(Map.get(section, "default_gpu_count")))
+    |> put_if_present(
+      :default_gpu_count,
+      non_negative_integer_value(Map.get(section, "default_gpu_count"))
+    )
     |> put_if_present(:runtime_class, scalar_string_value(Map.get(section, "runtime_class")))
   end
 
@@ -848,9 +895,15 @@ defmodule SymphonyElixir.Config do
 
   defp extract_agent_options(section) do
     %{}
-    |> put_if_present(:max_concurrent_agents, integer_value(Map.get(section, "max_concurrent_agents")))
+    |> put_if_present(
+      :max_concurrent_agents,
+      integer_value(Map.get(section, "max_concurrent_agents"))
+    )
     |> put_if_present(:max_turns, positive_integer_value(Map.get(section, "max_turns")))
-    |> put_if_present(:max_retry_backoff_ms, positive_integer_value(Map.get(section, "max_retry_backoff_ms")))
+    |> put_if_present(
+      :max_retry_backoff_ms,
+      positive_integer_value(Map.get(section, "max_retry_backoff_ms"))
+    )
     |> put_if_present(
       :max_concurrent_agents_by_state,
       state_limits_value(Map.get(section, "max_concurrent_agents_by_state"))
@@ -1193,6 +1246,15 @@ defmodule SymphonyElixir.Config do
   end
 
   defp normalize_execution_kind(_kind), do: :omit
+
+  defp normalize_temporal_workflow_mode(mode) when is_binary(mode) do
+    case mode |> String.trim() |> String.downcase() do
+      "" -> :omit
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_temporal_workflow_mode(_mode), do: :omit
 
   defp workflow_config do
     case current_workflow() do

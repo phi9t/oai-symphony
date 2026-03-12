@@ -1,0 +1,10 @@
+{
+  "status": "failed",
+  "targetState": "Rework",
+  "summary": "Remote run failed with an actionable blocker.",
+  "validation": [
+    "bash -n temporal/bin/symphony"
+  ],
+  "blockedReason": "Temporal helper failed to start the workflow.",
+  "needsContinuation": false
+}

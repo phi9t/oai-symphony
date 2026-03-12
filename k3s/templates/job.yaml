@@ -1,12 +1,12 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: symphony-job-${PROJECT_ID}-${JOB_NAME}
+  name: ${RESOURCE_NAME}
   namespace: ${NAMESPACE}
   labels:
     app: symphony
-    symphony/project-id: "${PROJECT_ID}"
-    symphony/job-name: "${JOB_NAME}"
+    symphony/project-id: "${RESOURCE_PROJECT_ID}"
+    symphony/job-name: "${RESOURCE_JOB_NAME}"
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: ${TTL_SECONDS_AFTER_FINISHED}
@@ -14,8 +14,8 @@ spec:
     metadata:
       labels:
         app: symphony
-        symphony/project-id: "${PROJECT_ID}"
-        symphony/job-name: "${JOB_NAME}"
+        symphony/project-id: "${RESOURCE_PROJECT_ID}"
+        symphony/job-name: "${RESOURCE_JOB_NAME}"
     spec:${RUNTIME_CLASS_BLOCK}
       restartPolicy: Never
       containers:
