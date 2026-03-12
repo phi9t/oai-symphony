@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Org.Client do
   @moduledoc """
-  Executes Org mode tracker operations through `emacsclient`.
+  Executes Org mode tracker operations through the configured Emacs command.
   """
 
   alias SymphonyElixir.{Config, Tracker.Issue}

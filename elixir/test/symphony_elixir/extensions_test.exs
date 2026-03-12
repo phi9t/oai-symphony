@@ -787,6 +787,52 @@ defmodule SymphonyElixir.ExtensionsTest do
              }
   end
 
+  test "phoenix observability api surfaces runtime readiness blockers" do
+    snapshot =
+      static_snapshot()
+      |> Map.put(:runtime, %{
+        execution_backend: "temporal_k3s",
+        ready: false,
+        blockers: [
+          %{
+            "code" => "temporal_worker_missing",
+            "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"default\""
+          }
+        ],
+        checked_at: DateTime.utc_now()
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RuntimeObservabilityApiOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll", "reconcile"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert state_payload["runtime"] == %{
+             "execution_backend" => "temporal_k3s",
+             "ready" => false,
+             "blockers" => [
+               %{
+                 "code" => "temporal_worker_missing",
+                 "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"default\""
+               }
+             ],
+             "checked_at" => state_payload["runtime"]["checked_at"]
+           }
+  end
+
   test "phoenix observability api preserves snapshot timeout behavior" do
     timeout_orchestrator = Module.concat(__MODULE__, :TimeoutOrchestrator)
     {:ok, _pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)

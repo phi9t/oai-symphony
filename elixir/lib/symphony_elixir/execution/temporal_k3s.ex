@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   require Logger
 
-  alias SymphonyElixir.{Config, PromptBuilder, TemporalCli, Tracker}
+  alias SymphonyElixir.{Config, PromptBuilder, TemporalCli, Tracker, Workspace}
   alias SymphonyElixir.Org.Adapter
   alias SymphonyElixir.Tracker.Issue
 
@@ -77,12 +77,23 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   def remove_issue_project(identifier) when is_binary(identifier) do
     identifier
     |> project_roots_for_identifier()
-    |> Enum.each(&File.rm_rf/1)
+    |> Enum.each(&remove_project_root(&1, identifier))
 
     :ok
   end
 
   def remove_issue_project(_identifier), do: :ok
+
+  @spec runtime_status(keyword()) :: map()
+  def runtime_status(opts \\ []) do
+    case TemporalCli.readiness(runtime_status_payload(), cli_opts(opts)) do
+      {:ok, %{} = payload} ->
+        normalize_runtime_status(payload)
+
+      {:error, reason} ->
+        helper_failure_runtime_status(reason)
+    end
+  end
 
   @spec project_workspace_path(String.t()) :: Path.t()
   def project_workspace_path(identifier) when is_binary(identifier) do
@@ -94,6 +105,19 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp cli_opts(opts) do
     opts
     |> Keyword.take([:runner, :command])
+  end
+
+  defp runtime_status_payload do
+    %{
+      "temporal" => %{
+        "address" => Config.temporal_address(),
+        "namespace" => Config.temporal_namespace(),
+        "taskQueue" => Config.temporal_task_queue()
+      },
+      "k3s" => %{
+        "namespace" => Config.k3s_namespace()
+      }
+    }
   end
 
   defp prepare_project!(issue, opts) do
@@ -135,10 +159,9 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp fetch_workpad(%Issue{id: issue_id}) when is_binary(issue_id) do
-    if Config.tracker_kind() == "orgmode" do
-      fetch_org_workpad(issue_id)
-    else
-      @default_workpad
+    case Config.tracker_kind() do
+      "orgmode" -> fetch_org_workpad(issue_id)
+      _ -> @default_workpad
     end
   end
 
@@ -319,31 +342,35 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp maybe_replace_org_workpad(%Issue{id: issue_id} = issue, content)
        when is_binary(issue_id) and is_binary(content) do
-    if Config.tracker_kind() == "orgmode" do
-      case Adapter.replace_workpad(issue_id, content) do
-        {:ok, _content} ->
-          :ok
+    case Config.tracker_kind() do
+      "orgmode" ->
+        case Adapter.replace_workpad(issue_id, content) do
+          {:ok, _content} ->
+            :ok
 
-        {:error, reason} ->
-          raise RuntimeError,
-                "Temporal/K3s failed to sync Org workpad for #{issue_context(issue)}: #{inspect(reason)}"
-      end
+          {:error, reason} ->
+            raise RuntimeError,
+                  "Temporal/K3s failed to sync Org workpad for #{issue_context(issue)}: #{inspect(reason)}"
+        end
+
+      _ ->
+        :ok
     end
-
-    :ok
   end
 
   defp maybe_replace_org_workpad(_issue, _content), do: :ok
 
   defp maybe_apply_run_result_state(%Issue{id: issue_id} = issue, %{} = result)
        when is_binary(issue_id) do
-    if Config.tracker_kind() == "orgmode" do
-      result
-      |> target_state_from_run_result()
-      |> maybe_sync_org_state!(issue, issue_id)
-    end
+    case Config.tracker_kind() do
+      "orgmode" ->
+        result
+        |> target_state_from_run_result()
+        |> maybe_sync_org_state!(issue, issue_id)
 
-    :ok
+      _ ->
+        :ok
+    end
   end
 
   defp maybe_apply_run_result_state(_issue, _result), do: :ok
@@ -490,6 +517,12 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     entry == base_project_id || String.starts_with?(entry, base_project_id <> "-attempt-")
   end
 
+  defp remove_project_root(project_root, identifier)
+       when is_binary(project_root) and is_binary(identifier) do
+    Workspace.run_before_remove_hook(Path.join(project_root, "workspace"), identifier)
+    File.rm_rf(project_root)
+  end
+
   defp temporal_request_payload(workflow_id, run_id \\ nil) when is_binary(workflow_id) do
     %{
       "workflowId" => workflow_id,
@@ -597,6 +630,79 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp truthy?("TRUE"), do: true
   defp truthy?(1), do: true
   defp truthy?(_value), do: false
+
+  defp normalize_runtime_status(payload) when is_map(payload) do
+    blockers = normalize_runtime_blockers(map_value(payload, "blockers"))
+
+    %{
+      execution_backend: "temporal_k3s",
+      ready: truthy?(map_value(payload, "ready")) and blockers == [],
+      blockers: blockers,
+      temporal: normalize_runtime_section(map_value(payload, "temporal")),
+      k3s: normalize_runtime_section(map_value(payload, "k3s")),
+      checked_at: DateTime.utc_now()
+    }
+  end
+
+  defp helper_failure_runtime_status(reason) do
+    %{
+      execution_backend: "temporal_k3s",
+      ready: false,
+      blockers: [
+        %{
+          "code" => "temporal_helper_failed",
+          "message" => format_runtime_reason(reason)
+        }
+      ],
+      temporal: nil,
+      k3s: nil,
+      checked_at: DateTime.utc_now()
+    }
+  end
+
+  defp normalize_runtime_blockers(blockers) when is_list(blockers) do
+    blockers
+    |> Enum.map(&normalize_runtime_blocker/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_runtime_blockers(_blockers), do: []
+
+  defp normalize_runtime_blocker(blocker) when is_map(blocker) do
+    case {map_value(blocker, "code"), map_value(blocker, "message")} do
+      {code, message} when is_binary(code) and is_binary(message) ->
+        %{"code" => code, "message" => message}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp normalize_runtime_blocker(_blocker), do: nil
+
+  defp normalize_runtime_section(section) when is_map(section), do: section
+  defp normalize_runtime_section(_section), do: nil
+
+  defp map_value(map, key) when is_map(map) do
+    Enum.find_value(map, fn
+      {^key, value} ->
+        value
+
+      {entry_key, value} ->
+        if to_string(entry_key) == key, do: value
+    end)
+  end
+
+  defp format_runtime_reason({:temporal_helper_failed, status, output})
+       when is_integer(status) and is_binary(output) do
+    "Temporal/K3s readiness helper failed with exit #{status}: #{output}"
+  end
+
+  defp format_runtime_reason({:temporal_helper_failed, message}) when is_binary(message) do
+    "Temporal/K3s readiness helper failed: #{message}"
+  end
+
+  defp format_runtime_reason(reason), do: "Temporal/K3s readiness probe failed: #{inspect(reason)}"
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
