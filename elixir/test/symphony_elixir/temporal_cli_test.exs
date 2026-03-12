@@ -25,6 +25,9 @@ defmodule SymphonyElixir.TemporalCliTest do
 
     assert {:ok, %{"subcommand" => "describe", "workflowId" => "issue/1"}} =
              TemporalCli.describe("issue/1", runner: runner)
+
+    assert {:ok, %{"subcommand" => "readiness", "status" => "running"}} =
+             TemporalCli.readiness(%{"temporal" => %{}}, runner: runner)
   end
 
   test "TemporalCli forwards Temporal connection payloads for non-run subcommands" do
@@ -56,6 +59,20 @@ defmodule SymphonyElixir.TemporalCliTest do
   test "TemporalCli reports malformed helper output" do
     runner = fn _command, _subcommand, _payload -> {:ok, "not-json"} end
     assert {:error, _reason} = TemporalCli.run(%{"workflowId" => "issue/2"}, runner: runner)
+  end
+
+  test "TemporalCli forwards readiness payloads unchanged" do
+    runner = fn _command, subcommand, payload ->
+      {:ok, Jason.encode!(%{"subcommand" => subcommand, "payload" => payload})}
+    end
+
+    readiness_payload = %{
+      "temporal" => %{"address" => "temporal.example:7233", "namespace" => "customer-a"},
+      "k3s" => %{"namespace" => "symphony"}
+    }
+
+    assert {:ok, %{"subcommand" => "readiness", "payload" => ^readiness_payload}} =
+             TemporalCli.readiness(readiness_payload, runner: runner)
   end
 
   test "Execution chooses remote workspace paths for temporal_k3s runs" do

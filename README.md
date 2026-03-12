@@ -35,19 +35,41 @@ help with the setup:
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
 For this repository itself, the repo-local Org workflows live under [`.symphony/`](.symphony):
-`local-bootstrap-workflow.md` keeps local implementation runs in `Human Review`, while
-`fork-self-land-workflow.md` rewrites workspace remotes to `phi9t/oai-symphony` and requires
-`commit`, `push`, and `land` before `Done`, with Codex runtime settings that allow unattended
-networked GitHub operations.
+`temporal-self-land-workflow.md` is the preferred unattended path on hosts where the Temporal/K3s
+runtime is available, `fork-self-land-workflow.md` remains the local fallback and requires
+`commit`, `push`, and `land` before `Done`, and `local-bootstrap-workflow.md` keeps supervised
+local runs in `Human Review`.
 
-To smoke the self-landing queue in this repository, start Symphony with
+Those Org workflows also define a planning lane: use `org_task.deep_dive` to keep structural
+analysis or failure investigation on the current task, and use `org_task.deep_revision` in
+`draft` mode for uncertain proposals or `create` mode only for clear top-level tasks with
+description, acceptance criteria, priority, validation steps, and a blank `Codex Workpad`.
+
+On supported hosts, start the queue with `./.symphony/temporal-self-land-workflow.md` after
+bringing up the stack and exporting its environment:
+
+```bash
+./dev/temporal-k3s up
+eval "$(./dev/temporal-k3s env)"
+mise exec -- ./elixir/bin/symphony ./.symphony/temporal-self-land-workflow.md
+```
+
+The remote self-landing path claims normal Org tasks, runs them through Temporal workflows and K3s
+jobs, syncs `.symphony/workpad.md` plus `.symphony/run-result.json` back into Org, and only marks
+tasks `Done` after the PR URL and merge commit are recorded in the workpad. Before each claim,
+Symphony now probes Temporal reachability, namespace availability, active worker pollers, and the
+target K3s namespace so blocked runtimes surface immediately instead of hanging after dispatch.
+Remote runs also bound repeated Temporal status-check failures by `codex.stall_timeout_ms`, fail
+the attempt if the final Org sync cannot be written back, start each retry in a fresh
+Temporal/K3s attempt, and run the configured `before_remove` cleanup hook before deleting remote
+project workspaces.
+
+To smoke the self-landing queue in this repository without the remote stack, start Symphony with
 `./.symphony/fork-self-land-workflow.md`, move an Org task to `Todo`, and let the queue drive the
 task through implementation, fork PR creation, merge, and `Done`. After the merge is recorded in
 the Org workpad, Symphony removes the matching workspace on the next terminal cleanup pass; if a
 task reaches a terminal state without merge, the `before_remove` hook closes any leftover fork PRs
-before deleting the workspace. Remote runs also bound repeated Temporal status-check failures by
-`codex.stall_timeout_ms`, fail the attempt if the final Org sync cannot be written back, and start
-each retry in a fresh Temporal workflow/K3s job attempt instead of reusing the prior remote IDs.
+before deleting the workspace.
 
 The repository now also ships a repo-owned Temporal/K3s developer stack for the remote backend:
 

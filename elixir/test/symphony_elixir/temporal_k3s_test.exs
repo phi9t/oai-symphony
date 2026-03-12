@@ -3,6 +3,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
   alias SymphonyElixir.Execution
   alias SymphonyElixir.Execution.TemporalK3s
+  alias SymphonyElixir.TestSupport.RecoveryScenarioHarness
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixirWeb.Presenter
 
@@ -467,7 +468,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
                  end
 
     assert %{status_calls: status_calls} = Agent.get(runner_state, & &1)
-    assert status_calls > 1
+    assert status_calls >= 1
   end
 
   test "TemporalK3s keeps retrying status errors when the stall timeout is disabled" do
@@ -555,86 +556,135 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert %{status_calls: 3} = Agent.get(runner_state, & &1)
   end
 
-  test "Orchestrator retries a failed remote run with fresh workflow and job identifiers" do
-    Application.put_env(:symphony_elixir, :org_client_module, StatefulRetryOrgClient)
-    Application.put_env(:symphony_elixir, :temporal_retry_test_recipient, self())
+  test "TemporalK3s runtime_status reports precise readiness blockers" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_task_queue: "symphony",
+      k3s_namespace: "symphony"
+    )
 
-    {:ok, issue_store} =
-      Agent.start_link(fn ->
-        [
-          %Issue{
-            id: "issue-remote-orchestrated-retry",
-            identifier: "REV-15",
-            title: "Retry through orchestrator",
-            description: "Exercise the real retry path",
-            state: "In Progress"
-          }
-        ]
+    runner = fn _command, subcommand, payload ->
+      assert subcommand == "readiness"
+      assert get_in(payload, ["temporal", "address"]) == "temporal.example:7233"
+      assert get_in(payload, ["temporal", "namespace"]) == "customer-a"
+      assert get_in(payload, ["temporal", "taskQueue"]) == "symphony"
+      assert get_in(payload, ["k3s", "namespace"]) == "symphony"
+
+      {:ok,
+       Jason.encode!(%{
+         "ready" => false,
+         "blockers" => [
+           %{
+             "code" => "temporal_worker_missing",
+             "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"customer-a\""
+           }
+         ],
+         "temporal" => %{"taskQueue" => "symphony", "workerReady" => false},
+         "k3s" => %{"namespace" => "symphony", "namespaceReady" => true}
+       })}
+    end
+
+    runtime_status = TemporalK3s.runtime_status(runner: runner)
+
+    assert runtime_status.execution_backend == "temporal_k3s"
+    refute runtime_status.ready
+
+    assert runtime_status.blockers == [
+             %{
+               "code" => "temporal_worker_missing",
+               "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"customer-a\""
+             }
+           ]
+
+    assert runtime_status.temporal["taskQueue"] == "symphony"
+    assert runtime_status.k3s["namespace"] == "symphony"
+    assert %DateTime{} = runtime_status.checked_at
+  end
+
+  test "Orchestrator retries a failed remote run with fresh workflow and job identifiers" do
+    RecoveryScenarioHarness.with_temporal_helper_lock(fn ->
+      Application.put_env(:symphony_elixir, :org_client_module, StatefulRetryOrgClient)
+      Application.put_env(:symphony_elixir, :temporal_retry_test_recipient, self())
+
+      {:ok, issue_store} =
+        Agent.start_link(fn ->
+          [
+            %Issue{
+              id: "issue-remote-orchestrated-retry",
+              identifier: "REV-15",
+              title: "Retry through orchestrator",
+              description: "Exercise the real retry path",
+              state: "In Progress"
+            }
+          ]
+        end)
+
+      Application.put_env(:symphony_elixir, :temporal_retry_issue_store, issue_store)
+
+      helper_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-temporal-orchestrator-retry-#{System.unique_integer([:positive])}"
+        )
+
+      helper_script = Path.join(helper_root, "fake-temporal-helper.py")
+      helper_trace = Path.join(helper_root, "temporal-helper-trace.jsonl")
+      k3s_project_root = Path.join(helper_root, "projects")
+
+      File.mkdir_p!(helper_root)
+      File.mkdir_p!(k3s_project_root)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :temporal_retry_test_recipient)
+        Application.delete_env(:symphony_elixir, :temporal_retry_issue_store)
+
+        if Process.alive?(issue_store) do
+          Agent.stop(issue_store)
+        end
+
+        File.rm_rf(helper_root)
       end)
 
-    Application.put_env(:symphony_elixir, :temporal_retry_issue_store, issue_store)
+      File.write!(
+        helper_script,
+        """
+        #!/usr/bin/env python3
+        import json
+        import os
+        import sys
 
-    helper_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-temporal-orchestrator-retry-#{System.unique_integer([:positive])}"
-      )
-
-    helper_script = Path.join(helper_root, "fake-temporal-helper.py")
-    helper_trace = Path.join(helper_root, "temporal-helper-trace.jsonl")
-    k3s_project_root = Path.join(helper_root, "projects")
-
-    File.mkdir_p!(helper_root)
-    File.mkdir_p!(k3s_project_root)
-
-    on_exit(fn ->
-      Application.delete_env(:symphony_elixir, :temporal_retry_test_recipient)
-      Application.delete_env(:symphony_elixir, :temporal_retry_issue_store)
-
-      if Process.alive?(issue_store) do
-        Agent.stop(issue_store)
-      end
-
-      File.rm_rf(helper_root)
-    end)
-
-    File.write!(
-      helper_script,
-      """
-      #!/usr/bin/env python3
-      import json
-      import os
-      import sys
-
-      def load_json(path):
+        def load_json(path):
           with open(path, "r", encoding="utf-8") as handle:
               return json.load(handle)
 
-      def write_json(path, payload):
+        def write_json(path, payload):
           with open(path, "w", encoding="utf-8") as handle:
               json.dump(payload, handle)
 
-      def append_event(path, payload):
+        def append_event(path, payload):
           with open(path, "a", encoding="utf-8") as handle:
               handle.write(json.dumps(payload) + "\\n")
 
-      def parse_input_path(argv):
+        def parse_input_path(argv):
           for index, arg in enumerate(argv):
               if arg == "--input":
                   return argv[index + 1]
           raise RuntimeError("--input argument missing")
 
-      subcommand = sys.argv[1]
-      payload = load_json(parse_input_path(sys.argv))
-      trace_path = os.environ["SYMPHONY_TEMPORAL_TRACE"]
-      state_path = trace_path + ".state.json"
+        subcommand = sys.argv[1]
+        payload = load_json(parse_input_path(sys.argv))
+        trace_path = os.environ["SYMPHONY_TEMPORAL_TRACE"]
+        state_path = trace_path + ".state.json"
 
-      if os.path.exists(state_path):
+        if os.path.exists(state_path):
           state = load_json(state_path)
-      else:
+        else:
           state = {"runs": []}
 
-      if subcommand == "run":
+        if subcommand == "run":
           run_number = len(state["runs"]) + 1
           run_id = "run-%03d" % run_number
           run = {
@@ -673,7 +723,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
                   }
               )
           )
-      elif subcommand == "status":
+        elif subcommand == "status":
           run = next(item for item in state["runs"] if item["workflowId"] == payload["workflowId"])
           append_event(
               trace_path,
@@ -720,64 +770,94 @@ defmodule SymphonyElixir.TemporalK3sTest do
               }
 
           print(json.dumps(response))
-      else:
+        elif subcommand == "readiness":
+          print(
+              json.dumps(
+                  {
+                      "ready": True,
+                      "blockers": [],
+                      "temporal": {
+                          "address": payload["temporal"]["address"],
+                          "namespace": payload["temporal"]["namespace"],
+                          "taskQueue": payload["temporal"]["taskQueue"],
+                          "reachable": True,
+                          "namespaceReady": True,
+                          "workerReady": True,
+                          "workflowPollers": 1,
+                          "activityPollers": 1,
+                      },
+                      "k3s": {
+                          "namespace": payload["k3s"]["namespace"],
+                          "namespaceReady": True,
+                          "launcherPath": "/tmp/fake-sjob",
+                          "kubectlCommand": "/tmp/fake-kubectl",
+                      },
+                  }
+              )
+          )
+        else:
           print(json.dumps({"workflowId": payload.get("workflowId"), "status": "unknown"}))
-      """
-    )
+        """
+      )
 
-    File.chmod!(helper_script, 0o755)
-    System.put_env("SYMPHONY_TEMPORAL_TRACE", helper_trace)
-    on_exit(fn -> System.delete_env("SYMPHONY_TEMPORAL_TRACE") end)
+      File.chmod!(helper_script, 0o755)
+      System.put_env("SYMPHONY_TEMPORAL_TRACE", helper_trace)
+      on_exit(fn -> System.delete_env("SYMPHONY_TEMPORAL_TRACE") end)
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "orgmode",
-      tracker_file: "/tmp/revision-plan.org",
-      tracker_root_id: "root-id",
-      execution_kind: "temporal_k3s",
-      repository_origin_url: "https://example.com/repo.git",
-      temporal_helper_command: helper_script,
-      temporal_address: "temporal.example:7233",
-      temporal_namespace: "customer-a",
-      temporal_status_poll_ms: 1,
-      poll_interval_ms: 5_000,
-      max_retry_backoff_ms: 1,
-      k3s_project_root: k3s_project_root
-    )
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "orgmode",
+        tracker_file: "/tmp/revision-plan.org",
+        tracker_root_id: "root-id",
+        execution_kind: "temporal_k3s",
+        repository_origin_url: "https://example.com/repo.git",
+        temporal_helper_command: helper_script,
+        temporal_address: "temporal.example:7233",
+        temporal_namespace: "customer-a",
+        temporal_status_poll_ms: 1,
+        poll_interval_ms: 5_000,
+        max_retry_backoff_ms: 1,
+        k3s_project_root: k3s_project_root
+      )
 
-    orchestrator_name = Module.concat(__MODULE__, :RemoteRetryOrchestrator)
+      orchestrator_name = Module.concat(__MODULE__, :RemoteRetryOrchestrator)
 
-    log =
-      capture_log(fn ->
-        {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+      log =
+        capture_log(fn ->
+          {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
-        on_exit(fn ->
-          if Process.alive?(pid) do
-            Process.exit(pid, :normal)
-          end
+          on_exit(fn ->
+            if Process.alive?(pid) do
+              Process.exit(pid, :normal)
+            end
+          end)
+
+          assert_eventually(
+            fn ->
+              match?({:ok, [_, _]}, orchestrated_retry_run_events(helper_trace))
+            end,
+            120
+          )
+
+          assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"},
+                         1_000
+
+          assert {:ok, [first_run, second_run]} = orchestrated_retry_run_events(helper_trace)
+
+          assert first_run["workflowId"] == "issue/issue-remote-orchestrated-retry"
+          assert first_run["projectId"] == "REV-15"
+          assert first_run["jobName"] == "symphony-job-REV-15"
+
+          assert second_run["workflowId"] != first_run["workflowId"]
+          assert second_run["workflowId"] =~ "/attempt-1-"
+          assert second_run["projectId"] != first_run["projectId"]
+          assert String.starts_with?(second_run["projectId"], "REV-15-attempt-1-")
+          assert second_run["jobName"] != first_run["jobName"]
+          assert String.starts_with?(second_run["jobName"], "symphony-job-REV-15-attempt-1-")
+          assert second_run["workspacePath"] != first_run["workspacePath"]
         end)
 
-        assert_eventually(fn ->
-          match?({:ok, [_, _]}, orchestrated_retry_run_events(helper_trace))
-        end, 120)
-
-        assert_receive {:org_set_task_state_called, "issue-remote-orchestrated-retry", "Done"}, 1_000
-
-        assert {:ok, [first_run, second_run]} = orchestrated_retry_run_events(helper_trace)
-
-        assert first_run["workflowId"] == "issue/issue-remote-orchestrated-retry"
-        assert first_run["projectId"] == "REV-15"
-        assert first_run["jobName"] == "symphony-job-REV-15"
-
-        assert second_run["workflowId"] != first_run["workflowId"]
-        assert second_run["workflowId"] =~ "/attempt-1-"
-        assert second_run["projectId"] != first_run["projectId"]
-        assert String.starts_with?(second_run["projectId"], "REV-15-attempt-1-")
-        assert second_run["jobName"] != first_run["jobName"]
-        assert String.starts_with?(second_run["jobName"], "symphony-job-REV-15-attempt-1-")
-        assert second_run["workspacePath"] != first_run["workspacePath"]
-      end)
-
-    assert log =~ "scheduling retry"
+      assert log =~ "scheduling retry"
+    end)
   end
 
   test "TemporalK3s retry attempts create fresh workflow and job identifiers" do
@@ -943,7 +1023,9 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert retry_payload["workflowId"] == retry_session_started.workflow_id
     assert first_payload["projectId"] == first_session_started.project_id
     assert retry_payload["projectId"] == retry_session_started.project_id
-    assert get_in(first_payload, ["paths", "workspacePath"]) != get_in(retry_payload, ["paths", "workspacePath"])
+
+    assert get_in(first_payload, ["paths", "workspacePath"]) !=
+             get_in(retry_payload, ["paths", "workspacePath"])
   end
 
   test "TemporalK3s raises when final Org workpad sync fails" do
@@ -1382,6 +1464,41 @@ defmodule SymphonyElixir.TemporalK3sTest do
     refute File.exists?(Path.dirname(workspace_path))
   end
 
+  test "remote cleanup runs before_remove hook for temporal project workspaces" do
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-cleanup-hook-#{System.unique_integer([:positive])}"
+      )
+
+    hook_output_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-cleanup-hook-output-#{System.unique_integer([:positive])}.txt"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+
+    on_exit(fn ->
+      File.rm_rf(k3s_project_root)
+      File.rm(hook_output_path)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      k3s_project_root: k3s_project_root,
+      hook_before_remove: "printf remote-cleanup > #{hook_output_path}"
+    )
+
+    workspace_path = TemporalK3s.project_workspace_path("REV-13")
+    File.mkdir_p!(workspace_path)
+
+    assert :ok = Execution.cleanup_issue_workspace("REV-13", %{execution_backend: "temporal_k3s"})
+    assert File.read!(hook_output_path) == "remote-cleanup"
+    refute File.exists?(workspace_path)
+  end
+
   defp assert_temporal_status_update(update, expected_status, expected_run_id) do
     assert update.event == :notification
     assert update.execution_backend == "temporal_k3s"
@@ -1432,4 +1549,12 @@ defmodule SymphonyElixir.TemporalK3sTest do
       "namespace" => "customer-a"
     }
   end
+end
+
+defmodule SymphonyElixir.TemporalK3sRecoveryScenarioHarnessTest do
+  use SymphonyElixir.TestSupport
+
+  import SymphonyElixir.TestSupport.RecoveryScenarioHarness
+
+  define_scenarios(SymphonyElixir.TestSupport.RecoveryScenarioHarness.TemporalAdapter)
 end

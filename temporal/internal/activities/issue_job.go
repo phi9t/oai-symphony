@@ -204,18 +204,48 @@ func resolveSjobPath() (string, error) {
 }
 
 func buildJobCommand(input RunInput) string {
+	workspacePath := containerWorkspacePath(input.Paths.WorkspacePath)
+
 	envAssignments := []string{
-		"PROMPT_PATH=" + shellEscape(input.Paths.PromptPath),
-		"WORKPAD_PATH=" + shellEscape(input.Paths.WorkpadPath),
-		"RESULT_PATH=" + shellEscape(input.Paths.ResultPath),
-		"ISSUE_PATH=" + shellEscape(input.Paths.IssuePath),
+		"PROMPT_PATH=" + shellEscape(containerWorkspacePathForFile(input.Paths.WorkspacePath, input.Paths.PromptPath)),
+		"WORKPAD_PATH=" + shellEscape(containerWorkspacePathForFile(input.Paths.WorkspacePath, input.Paths.WorkpadPath)),
+		"RESULT_PATH=" + shellEscape(containerWorkspacePathForFile(input.Paths.WorkspacePath, input.Paths.ResultPath)),
+		"ISSUE_PATH=" + shellEscape(containerWorkspacePathForFile(input.Paths.WorkspacePath, input.Paths.IssuePath)),
 		"REPOSITORY_ORIGIN_URL=" + shellEscape(input.Repository.OriginURL),
 		"REPOSITORY_DEFAULT_BRANCH=" + shellEscape(fallback(input.Repository.DefaultBranch, "main")),
-		"WORKSPACE_PATH=" + shellEscape(input.Paths.WorkspacePath),
+		"WORKSPACE_PATH=" + shellEscape(workspacePath),
 		"CODEX_COMMAND=" + shellEscape(fallback(input.Codex.Command, "codex exec --full-auto --json")),
 	}
 
 	return strings.Join(append(envAssignments, "/opt/symphony/k3s/bin/run-agent-job"), " ")
+}
+
+func containerWorkspacePath(hostPath string) string {
+	return containerWorkspacePathForFile(hostPath, hostPath)
+}
+
+func containerWorkspacePathForFile(workspaceRoot, hostPath string) string {
+	workspaceRoot = strings.TrimSpace(workspaceRoot)
+	hostPath = strings.TrimSpace(hostPath)
+
+	if workspaceRoot == "" || hostPath == "" {
+		return hostPath
+	}
+
+	relativePath, err := filepath.Rel(workspaceRoot, hostPath)
+	if err != nil {
+		return hostPath
+	}
+
+	if relativePath == "." {
+		return "/workspace"
+	}
+
+	if relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return hostPath
+	}
+
+	return filepath.ToSlash(filepath.Join("/workspace", relativePath))
 }
 
 func sjobRunArgs(input RunInput, jobName, command string) []string {
