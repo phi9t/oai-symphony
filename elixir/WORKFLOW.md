@@ -5,6 +5,10 @@
 # `git@github.com:phi9t/oai-symphony.git`, enables networked Codex turns
 # for GitHub operations, and requires `commit`, `push`, and `land`
 # before a task can move to `Done`.
+# `./dev/temporal-k3s smoke` is the minimum operator-run proof for this
+# remote backend. Promote repeated automation only on self-hosted runners
+# that can host Docker, the repo-managed Temporal/K3s stack, and a real
+# `symphony/agent:latest` image.
 # In a self-landing setup, only emit `targetState: "Done"` after the PR has
 # actually merged. Once the tracker reflects that terminal state, Symphony
 # removes the matching workspace; if `hooks.before_remove` is configured, it

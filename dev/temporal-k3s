@@ -4,26 +4,45 @@ set -eu -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
+readonly SCRIPT_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly STATE_ROOT="${REPO_ROOT}/.symphony/dev/temporal-k3s"
 readonly LOG_ROOT="${STATE_ROOT}/logs"
+readonly EVIDENCE_ROOT="${STATE_ROOT}/evidence"
 readonly WORKER_PID_FILE="${STATE_ROOT}/worker.pid"
 readonly WORKER_LOG="${LOG_ROOT}/worker.log"
+readonly WORKER_META_FILE="${STATE_ROOT}/worker.env"
 readonly KUBECTL_WRAPPER="${REPO_ROOT}/k3s/bin/docker-kubectl"
+DOCKER_CONFIG="${SYMPHONY_DOCKER_CONFIG:-${STATE_ROOT}/docker-config}"
+BUILDX_CONFIG="${SYMPHONY_DOCKER_BUILDX_CONFIG:-${STATE_ROOT}/docker-buildx}"
+export DOCKER_CONFIG BUILDX_CONFIG
 
 TEMPORAL_CONTAINER_NAME="${SYMPHONY_TEMPORAL_CONTAINER_NAME:-symphony-temporal-dev}"
 K3S_CONTAINER_NAME="${SYMPHONY_K3S_CONTAINER_NAME:-symphony-k3s-dev}"
 PROJECT_ROOT="${SYMPHONY_K3S_PROJECT_ROOT:-${REPO_ROOT}/.symphony/dev/projects}"
 SHARED_CACHE_ROOT="${SYMPHONY_K3S_SHARED_CACHE_ROOT:-${REPO_ROOT}/.symphony/dev/shared-cache}"
 SMOKE_IMAGE="${SYMPHONY_SMOKE_IMAGE:-symphony/smoke-agent:dev}"
-TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:7233}"
+TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:17233}"
 TEMPORAL_NAMESPACE="${TEMPORAL_NAMESPACE:-default}"
 TEMPORAL_TASK_QUEUE="${TEMPORAL_TASK_QUEUE:-symphony}"
 K3S_NAMESPACE="${SYMPHONY_K3S_NAMESPACE:-symphony}"
-TEMPORAL_SERVER_IMAGE="${SYMPHONY_TEMPORAL_SERVER_IMAGE:-temporalio/server}"
+TEMPORAL_SERVER_IMAGE="${SYMPHONY_TEMPORAL_SERVER_IMAGE:-temporalio/temporal:latest}"
 K3S_SERVER_IMAGE="${SYMPHONY_K3S_SERVER_IMAGE:-rancher/k3s}"
 SMOKE_TIMEOUT_SECONDS="${SYMPHONY_SMOKE_TIMEOUT_SECONDS:-180}"
 K3S_API_PORT="${SYMPHONY_K3S_API_PORT:-6445}"
+
+LAST_K3S_ERROR=""
+LAST_WORKER_ERROR=""
+SMOKE_ID=""
+SMOKE_EVIDENCE_PATH=""
+SMOKE_PROJECT_ROOT=""
+SMOKE_WORKSPACE_PATH=""
+SMOKE_OUTPUTS_PATH=""
+SMOKE_WORKPAD_PATH=""
+SMOKE_RESULT_PATH=""
+SMOKE_WORKFLOW_ID=""
+SMOKE_RUN_ID=""
+SMOKE_JOB_NAME=""
 
 usage() {
     cat <<'EOF'
@@ -50,7 +69,7 @@ require_command() {
 }
 
 ensure_dirs() {
-    mkdir -p "${STATE_ROOT}" "${LOG_ROOT}" "${PROJECT_ROOT}" "${SHARED_CACHE_ROOT}"
+    mkdir -p "${STATE_ROOT}" "${LOG_ROOT}" "${EVIDENCE_ROOT}" "${PROJECT_ROOT}" "${SHARED_CACHE_ROOT}" "${DOCKER_CONFIG}" "${BUILDX_CONFIG}"
 }
 
 docker_ready() {
@@ -65,30 +84,173 @@ container_running() {
     [[ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || echo false)" == "true" ]]
 }
 
+compact_output() {
+    local value="$1"
+    value="${value//$'\r'/ }"
+    value="${value//$'\n'/ }"
+    value="$(echo "${value}" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+    printf '%s' "${value}"
+}
+
+configured_temporal_host() {
+    echo "${TEMPORAL_ADDRESS%%:*}"
+}
+
+configured_temporal_port() {
+    echo "${TEMPORAL_ADDRESS##*:}"
+}
+
+normalize_published_host() {
+    local host="$1"
+
+    case "${host}" in
+        "" | "0.0.0.0" | "::" | "[::]") echo "127.0.0.1" ;;
+        *) echo "${host}" ;;
+    esac
+}
+
+temporal_container_address() {
+    local mapping
+    mapping="$(docker port "${TEMPORAL_CONTAINER_NAME}" 7233/tcp 2>/dev/null | head -n 1 | tr -d '\r')" || return 1
+    [[ -n "${mapping}" ]] || return 1
+
+    local host="${mapping%:*}"
+    local port="${mapping##*:}"
+    printf '%s:%s\n' "$(normalize_published_host "${host}")" "${port}"
+}
+
+effective_temporal_address() {
+    local container_address
+
+    if container_running "${TEMPORAL_CONTAINER_NAME}" && container_address="$(temporal_container_address)"; then
+        echo "${container_address}"
+    else
+        echo "${TEMPORAL_ADDRESS}"
+    fi
+}
+
+effective_temporal_host() {
+    local address
+    address="$(effective_temporal_address)"
+    echo "${address%%:*}"
+}
+
+effective_temporal_port() {
+    local address
+    address="$(effective_temporal_address)"
+    echo "${address##*:}"
+}
+
+worker_config_matches() {
+    [[ -f "${WORKER_META_FILE}" ]] || return 1
+
+    local WORKER_TEMPORAL_ADDRESS=""
+    local WORKER_TEMPORAL_NAMESPACE=""
+    local WORKER_TEMPORAL_TASK_QUEUE=""
+    # shellcheck disable=SC1090
+    source "${WORKER_META_FILE}"
+
+    [[ "${WORKER_TEMPORAL_ADDRESS}" == "$(effective_temporal_address)" ]] &&
+        [[ "${WORKER_TEMPORAL_NAMESPACE}" == "${TEMPORAL_NAMESPACE}" ]] &&
+        [[ "${WORKER_TEMPORAL_TASK_QUEUE}" == "${TEMPORAL_TASK_QUEUE}" ]]
+}
+
+worker_candidate_pids() {
+    local pid=""
+    local command=""
+
+    while read -r pid command; do
+        [[ -n "${pid}" ]] || continue
+
+        case "${command}" in
+            "${REPO_ROOT}/.symphony/dev/go-tmp/"*/exe/worker* | "${REPO_ROOT}/temporal/bin/worker"*) printf '%s\n' "${pid}" ;;
+        esac
+    done < <(ps -eo pid=,command=)
+}
+
+current_worker_pid() {
+    local pid=""
+
+    if [[ -f "${WORKER_PID_FILE}" ]]; then
+        pid="$(cat "${WORKER_PID_FILE}")"
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
+            printf '%s\n' "${pid}"
+            return 0
+        fi
+    fi
+
+    while IFS= read -r pid; do
+        [[ -n "${pid}" ]] || continue
+        printf '%s\n' "${pid}"
+        return 0
+    done < <(worker_candidate_pids)
+
+    return 1
+}
+
+worker_process_groups() {
+    local pid=""
+    local pgid=""
+
+    worker_pids | while IFS= read -r pid; do
+        [[ -n "${pid}" ]] || continue
+        pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d ' ')"
+        [[ -n "${pgid}" ]] && printf '%s\n' "${pgid}"
+    done | sort -u
+}
+
+worker_pids() {
+    {
+        current_worker_pid 2>/dev/null || true
+        worker_candidate_pids
+    } | awk 'NF && !seen[$0]++ { print $0 }'
+}
+
 worker_running() {
-    [[ -f "${WORKER_PID_FILE}" ]] || return 1
-    kill -0 "$(cat "${WORKER_PID_FILE}")" >/dev/null 2>&1
+    current_worker_pid >/dev/null 2>&1
 }
 
 stop_worker() {
+    local pgid=""
+    local pid=""
+    local wait_deadline=0
+
+    while IFS= read -r pgid; do
+        kill -- "-${pgid}" >/dev/null 2>&1 || kill "${pgid}" >/dev/null 2>&1 || true
+    done < <(worker_process_groups)
+
+    while IFS= read -r pid; do
+        kill "${pid}" >/dev/null 2>&1 || true
+    done < <(worker_pids)
+
+    wait_deadline=$((SECONDS + 10))
+    while worker_running && ((SECONDS < wait_deadline)); do
+        sleep 1
+    done
+
     if worker_running; then
-        kill "$(cat "${WORKER_PID_FILE}")" >/dev/null 2>&1 || true
-        wait "$(cat "${WORKER_PID_FILE}")" 2>/dev/null || true
+        while IFS= read -r pgid; do
+            kill -9 -- "-${pgid}" >/dev/null 2>&1 || kill -9 "${pgid}" >/dev/null 2>&1 || true
+        done < <(worker_process_groups)
+
+        while IFS= read -r pid; do
+            kill -9 "${pid}" >/dev/null 2>&1 || true
+        done < <(worker_pids)
     fi
 
-    rm -f "${WORKER_PID_FILE}"
+    rm -f "${WORKER_PID_FILE}" "${WORKER_META_FILE}"
 }
 
 with_dev_kubectl() {
     SYMPHONY_K3S_CONTAINER_NAME="${K3S_CONTAINER_NAME}" "${KUBECTL_WRAPPER}" "$@"
 }
 
-temporal_host() {
-    echo "${TEMPORAL_ADDRESS%%:*}"
-}
-
-temporal_port() {
-    echo "${TEMPORAL_ADDRESS##*:}"
+store_worker_meta() {
+    cat > "${WORKER_META_FILE}" <<EOF
+WORKER_TEMPORAL_ADDRESS=$(printf '%q' "$(effective_temporal_address)")
+WORKER_TEMPORAL_NAMESPACE=$(printf '%q' "${TEMPORAL_NAMESPACE}")
+WORKER_TEMPORAL_TASK_QUEUE=$(printf '%q' "${TEMPORAL_TASK_QUEUE}")
+EOF
 }
 
 wait_for_tcp() {
@@ -109,55 +271,78 @@ wait_for_tcp() {
 
 wait_for_k3s() {
     local deadline=$((SECONDS + 60))
+    local last_error=""
 
     while ((SECONDS < deadline)); do
-        if with_dev_kubectl get nodes >/dev/null 2>&1; then
+        if last_error="$(with_dev_kubectl get nodes 2>&1)"; then
+            LAST_K3S_ERROR=""
             return 0
         fi
         sleep 2
     done
 
+    LAST_K3S_ERROR="${last_error}"
     return 1
 }
 
 wait_for_worker() {
     local deadline=$((SECONDS + 30))
+    local last_error=""
 
     while ((SECONDS < deadline)); do
         if grep -q "worker started" "${WORKER_LOG}" 2>/dev/null; then
+            LAST_WORKER_ERROR=""
             return 0
         fi
 
         if ! worker_running; then
+            last_error="$(tail -n 20 "${WORKER_LOG}" 2>/dev/null || true)"
+            LAST_WORKER_ERROR="${last_error}"
             return 1
         fi
 
         sleep 1
     done
 
+    LAST_WORKER_ERROR="$(tail -n 20 "${WORKER_LOG}" 2>/dev/null || true)"
     return 1
 }
 
 start_temporal_container() {
+    local container_address=""
+    local start_output=""
+
     if container_running "${TEMPORAL_CONTAINER_NAME}"; then
-        log "Temporal container already running: ${TEMPORAL_CONTAINER_NAME}"
+        container_address="$(temporal_container_address || true)"
+        log "Temporal container already running: ${TEMPORAL_CONTAINER_NAME}${container_address:+ at ${container_address}}"
     else
         if container_exists "${TEMPORAL_CONTAINER_NAME}"; then
             docker rm -f "${TEMPORAL_CONTAINER_NAME}" >/dev/null
         fi
 
-        docker run -d \
-            --name "${TEMPORAL_CONTAINER_NAME}" \
-            -p "$(temporal_host):$(temporal_port):7233" \
-            "${TEMPORAL_SERVER_IMAGE}" \
-            server start-dev --ip 0.0.0.0 --namespace "${TEMPORAL_NAMESPACE}" >/dev/null
+        start_output="$(
+            docker run -d \
+                --name "${TEMPORAL_CONTAINER_NAME}" \
+                -p "$(configured_temporal_host):$(configured_temporal_port):7233" \
+                "${TEMPORAL_SERVER_IMAGE}" \
+                server start-dev --ip 0.0.0.0 --namespace "${TEMPORAL_NAMESPACE}" 2>&1
+        )" || die "repo-managed Temporal could not start on ${TEMPORAL_ADDRESS}: $(compact_output "${start_output}")"
         log "Started Temporal container ${TEMPORAL_CONTAINER_NAME}"
     fi
 
-    wait_for_tcp "$(temporal_host)" "$(temporal_port)" 60 || die "Temporal did not become ready"
+    container_address="$(effective_temporal_address)"
+    wait_for_tcp "$(effective_temporal_host)" "$(effective_temporal_port)" 60 ||
+        die "repo-managed Temporal did not become ready at ${container_address}; check docker logs ${TEMPORAL_CONTAINER_NAME}"
+
+    if [[ "${container_address}" != "${TEMPORAL_ADDRESS}" ]]; then
+        log "Using existing repo-managed Temporal address ${container_address} instead of configured TEMPORAL_ADDRESS=${TEMPORAL_ADDRESS}"
+    fi
 }
 
 start_k3s_container() {
+    local namespace_apply_output=""
+    local start_output=""
+
     if container_running "${K3S_CONTAINER_NAME}"; then
         log "K3s container already running: ${K3S_CONTAINER_NAME}"
     else
@@ -165,20 +350,25 @@ start_k3s_container() {
             docker rm -f "${K3S_CONTAINER_NAME}" >/dev/null
         fi
 
-        docker run -d \
-            --name "${K3S_CONTAINER_NAME}" \
-            --privileged \
-            -p "127.0.0.1:${K3S_API_PORT}:6443" \
-            -v "${REPO_ROOT}:${REPO_ROOT}" \
-            -v "${PROJECT_ROOT}:${PROJECT_ROOT}" \
-            -v "${SHARED_CACHE_ROOT}:${SHARED_CACHE_ROOT}" \
-            "${K3S_SERVER_IMAGE}" \
-            server --disable=traefik --write-kubeconfig-mode=644 >/dev/null
+        start_output="$(
+            docker run -d \
+                --name "${K3S_CONTAINER_NAME}" \
+                --privileged \
+                -p "127.0.0.1:${K3S_API_PORT}:6443" \
+                -v "${REPO_ROOT}:${REPO_ROOT}" \
+                -v "${PROJECT_ROOT}:${PROJECT_ROOT}" \
+                -v "${SHARED_CACHE_ROOT}:${SHARED_CACHE_ROOT}" \
+                "${K3S_SERVER_IMAGE}" \
+                server --disable=traefik --write-kubeconfig-mode=644 2>&1
+        )" || die "repo-managed K3s could not start on 127.0.0.1:${K3S_API_PORT}: $(compact_output "${start_output}")"
         log "Started K3s container ${K3S_CONTAINER_NAME}"
     fi
 
-    wait_for_k3s || die "K3s did not become ready"
-    with_dev_kubectl apply -f "${REPO_ROOT}/k3s/manifests/namespace.yaml" >/dev/null
+    wait_for_k3s ||
+        die "repo-managed K3s did not become ready in ${K3S_CONTAINER_NAME}: $(compact_output "${LAST_K3S_ERROR}")"
+
+    namespace_apply_output="$(with_dev_kubectl apply -f "${REPO_ROOT}/k3s/manifests/namespace.yaml" 2>&1)" ||
+        die "repo-managed K3s could not create namespace ${K3S_NAMESPACE}: $(compact_output "${namespace_apply_output}")"
 }
 
 build_smoke_image() {
@@ -187,28 +377,126 @@ build_smoke_image() {
 }
 
 import_smoke_image() {
-    docker save "${SMOKE_IMAGE}" | docker exec -i "${K3S_CONTAINER_NAME}" k3s ctr images import - >/dev/null
+    docker save "${SMOKE_IMAGE}" | docker exec -i "${K3S_CONTAINER_NAME}" ctr -n k8s.io images import - >/dev/null
     log "Imported smoke agent image into ${K3S_CONTAINER_NAME}"
 }
 
 start_worker() {
-    if worker_running; then
-        log "Temporal worker already running with pid $(cat "${WORKER_PID_FILE}")"
+    local force_restart="${1:-0}"
+    local active_temporal_address
+    active_temporal_address="$(effective_temporal_address)"
+
+    if worker_running && worker_config_matches && [[ "${force_restart}" != "1" ]]; then
+        log "Temporal worker already running with pid $(current_worker_pid) at ${active_temporal_address}"
         return 0
     fi
 
+    if worker_running; then
+        if [[ "${force_restart}" == "1" ]]; then
+            log "Restarting Temporal worker to apply the latest repo-managed code"
+        else
+            log "Restarting Temporal worker to match repo-managed stack state"
+        fi
+        stop_worker
+    fi
+
     rm -f "${WORKER_PID_FILE}"
+    : > "${WORKER_LOG}"
 
     (
         cd "${REPO_ROOT}"
-        export TEMPORAL_ADDRESS TEMPORAL_NAMESPACE TEMPORAL_TASK_QUEUE
+        export TEMPORAL_ADDRESS="${active_temporal_address}" TEMPORAL_NAMESPACE TEMPORAL_TASK_QUEUE
         export SYMPHONY_KUBECTL_WRAPPER="${KUBECTL_WRAPPER}"
         export SYMPHONY_K3S_CONTAINER_NAME="${K3S_CONTAINER_NAME}"
-        nohup ./temporal/bin/worker >"${WORKER_LOG}" 2>&1 &
+        setsid ./temporal/bin/worker >"${WORKER_LOG}" 2>&1 < /dev/null &
         echo $! > "${WORKER_PID_FILE}"
     )
 
-    wait_for_worker || die "Temporal worker exited before becoming ready; see ${WORKER_LOG}"
+    wait_for_worker ||
+        die "Temporal worker did not become ready for ${active_temporal_address}/${TEMPORAL_NAMESPACE}/${TEMPORAL_TASK_QUEUE}: $(compact_output "${LAST_WORKER_ERROR}")"
+
+    store_worker_meta
+}
+
+detail_suffix() {
+    local detail="$1"
+
+    if [[ -n "${detail}" ]]; then
+        printf ' (%s)' "${detail}"
+    fi
+}
+
+probe_temporal_status() {
+    local container_address=""
+
+    if ! container_running "${TEMPORAL_CONTAINER_NAME}"; then
+        printf 'stopped\tcontainer %s is not running\n' "${TEMPORAL_CONTAINER_NAME}"
+        return 0
+    fi
+
+    if ! container_address="$(temporal_container_address)"; then
+        printf 'blocked\tcontainer %s has no published 7233/tcp mapping\n' "${TEMPORAL_CONTAINER_NAME}"
+        return 0
+    fi
+
+    if wait_for_tcp "$(effective_temporal_host)" "$(effective_temporal_port)" 1; then
+        if [[ "${container_address}" == "${TEMPORAL_ADDRESS}" ]]; then
+            printf 'ready\taddress=%s\n' "${container_address}"
+        else
+            printf 'ready\taddress=%s; configured TEMPORAL_ADDRESS=%s; run eval "$(%s env)" to sync clients\n' "${container_address}" "${TEMPORAL_ADDRESS}" "${SCRIPT_PATH}"
+        fi
+    else
+        printf 'blocked\tcontainer %s is running but %s is unreachable\n' "${TEMPORAL_CONTAINER_NAME}" "${container_address}"
+    fi
+}
+
+probe_k3s_status() {
+    local node_output=""
+    local node_count=""
+
+    if ! container_running "${K3S_CONTAINER_NAME}"; then
+        printf 'stopped\tcontainer %s is not running\n' "${K3S_CONTAINER_NAME}"
+        return 0
+    fi
+
+    if node_output="$(with_dev_kubectl get nodes -o name 2>&1)"; then
+        node_count="$(printf '%s\n' "${node_output}" | sed '/^$/d' | wc -l | tr -d ' ')"
+        printf 'ready\tnodes=%s\n' "${node_count}"
+    else
+        printf 'blocked\t%s\n' "$(compact_output "${node_output}")"
+    fi
+}
+
+probe_worker_status() {
+    if worker_running && worker_config_matches; then
+        printf 'ready\tpid=%s address=%s queue=%s\n' "$(current_worker_pid)" "$(effective_temporal_address)" "${TEMPORAL_TASK_QUEUE}"
+    elif worker_running; then
+        printf 'blocked\tpid=%s is running with stale Temporal config; restart via %s up\n' "$(current_worker_pid)" "${SCRIPT_PATH}"
+    elif [[ -f "${WORKER_LOG}" ]]; then
+        printf 'stopped\tlog=%s\n' "${WORKER_LOG}"
+    else
+        printf 'stopped\tlog=%s has not been created yet\n' "${WORKER_LOG}"
+    fi
+}
+
+probe_namespace_status() {
+    local namespace_output=""
+
+    if ! container_running "${K3S_CONTAINER_NAME}"; then
+        printf 'missing\tK3s container %s is not running\n' "${K3S_CONTAINER_NAME}"
+        return 0
+    fi
+
+    if ! with_dev_kubectl get nodes >/dev/null 2>&1; then
+        printf 'blocked\tK3s control plane is not reachable via %s\n' "${KUBECTL_WRAPPER}"
+        return 0
+    fi
+
+    if namespace_output="$(with_dev_kubectl get namespace "${K3S_NAMESPACE}" 2>&1)"; then
+        printf 'ready\t%s\n' "${K3S_NAMESPACE}"
+    else
+        printf 'missing\t%s\n' "$(compact_output "${namespace_output}")"
+    fi
 }
 
 cmd_up() {
@@ -216,6 +504,7 @@ cmd_up() {
     require_command envsubst
     require_command git
     require_command go
+    require_command setsid
     docker_ready || die "docker daemon not reachable"
     ensure_dirs
 
@@ -223,7 +512,7 @@ cmd_up() {
     start_k3s_container
     build_smoke_image
     import_smoke_image
-    start_worker
+    start_worker 1
 
     cmd_status
 }
@@ -231,66 +520,326 @@ cmd_up() {
 cmd_status() {
     require_command docker
 
-    local temporal_state="stopped"
-    local k3s_state="stopped"
-    local worker_state="stopped"
-    local namespace_state="missing"
+    local temporal_state=""
+    local temporal_detail=""
+    local k3s_state=""
+    local k3s_detail=""
+    local worker_state=""
+    local worker_detail=""
+    local namespace_state=""
+    local namespace_detail=""
 
-    if container_running "${TEMPORAL_CONTAINER_NAME}" && wait_for_tcp "$(temporal_host)" "$(temporal_port)" 1; then
-        temporal_state="ready"
-    fi
+    IFS=$'\t' read -r temporal_state temporal_detail < <(probe_temporal_status)
+    IFS=$'\t' read -r k3s_state k3s_detail < <(probe_k3s_status)
+    IFS=$'\t' read -r worker_state worker_detail < <(probe_worker_status)
+    IFS=$'\t' read -r namespace_state namespace_detail < <(probe_namespace_status)
 
-    if container_running "${K3S_CONTAINER_NAME}" && with_dev_kubectl get nodes >/dev/null 2>&1; then
-        k3s_state="ready"
-        if with_dev_kubectl get namespace "${K3S_NAMESPACE}" >/dev/null 2>&1; then
-            namespace_state="ready"
-        fi
-    fi
-
-    if worker_running; then
-        worker_state="ready"
-    fi
-
-    printf 'temporal: %s\n' "${temporal_state}"
-    printf 'k3s: %s\n' "${k3s_state}"
-    printf 'worker: %s\n' "${worker_state}"
-    printf 'namespace: %s\n' "${namespace_state}"
+    printf 'temporal: %s%s\n' "${temporal_state}" "$(detail_suffix "${temporal_detail}")"
+    printf 'k3s: %s%s\n' "${k3s_state}" "$(detail_suffix "${k3s_detail}")"
+    printf 'worker: %s%s\n' "${worker_state}" "$(detail_suffix "${worker_detail}")"
+    printf 'namespace: %s%s\n' "${namespace_state}" "$(detail_suffix "${namespace_detail}")"
 
     [[ "${temporal_state}" == "ready" && "${k3s_state}" == "ready" && "${worker_state}" == "ready" && "${namespace_state}" == "ready" ]]
 }
 
 cmd_env() {
-    printf 'export TEMPORAL_ADDRESS=%q\n' "${TEMPORAL_ADDRESS}"
+    printf 'export TEMPORAL_ADDRESS=%q\n' "$(effective_temporal_address)"
     printf 'export TEMPORAL_NAMESPACE=%q\n' "${TEMPORAL_NAMESPACE}"
     printf 'export TEMPORAL_TASK_QUEUE=%q\n' "${TEMPORAL_TASK_QUEUE}"
     printf 'export SYMPHONY_K3S_PROJECT_ROOT=%q\n' "${PROJECT_ROOT}"
     printf 'export SYMPHONY_K3S_SHARED_CACHE_ROOT=%q\n' "${SHARED_CACHE_ROOT}"
 }
 
+last_nonempty_line() {
+    local path="$1"
+    awk 'NF { line = $0 } END { print line }' "${path}"
+}
+
+capture_command_output() {
+    local output_path="$1"
+    shift
+    "$@" > "${output_path}" 2>&1 || true
+}
+
+capture_optional_file() {
+    local source_path="$1"
+    local output_path="$2"
+
+    if [[ -f "${source_path}" ]]; then
+        cp "${source_path}" "${output_path}"
+    fi
+}
+
+json_file_field() {
+    local json_path="$1"
+    local field_name="$2"
+
+    python3 - "${json_path}" "${field_name}" <<'PY'
+import json
+import sys
+
+path, field_name = sys.argv[1], sys.argv[2]
+
+with open(path, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+value = payload.get(field_name)
+if value is None:
+    sys.exit(1)
+
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif isinstance(value, (int, float)):
+    print(value)
+elif isinstance(value, str):
+    print(value)
+else:
+    print(json.dumps(value))
+PY
+}
+
+extract_json_payload() {
+    local source_path="$1"
+
+    awk '
+        /^[[:space:]]*\{.*\}[[:space:]]*$/ { line = $0 }
+        END {
+            if (line == "") {
+                exit 1
+            }
+            print line
+        }
+    ' "${source_path}"
+}
+
+classify_temporal_command_error() {
+    local phase="$1"
+    local output="$2"
+    local detail
+    detail="$(compact_output "${output}")"
+
+    case "${detail}" in
+        *"namespace"*not\ found*)
+            printf 'missing Temporal namespace %s at %s during %s: %s\n' "${TEMPORAL_NAMESPACE}" "$(effective_temporal_address)" "${phase}" "${detail}"
+            ;;
+        *"unable to create Temporal client"* | *"connection refused"* | *"context deadline exceeded"* | *"i/o timeout"* | *"transport is closing"* | *"deadline exceeded"* | *"connection error"*)
+            printf 'unreachable Temporal at %s during %s: %s\n' "$(effective_temporal_address)" "${phase}" "${detail}"
+            ;;
+        *)
+            printf 'Temporal %s failed: %s\n' "${phase}" "${detail}"
+            ;;
+    esac
+}
+
+smoke_job_status() {
+    local job_output=""
+    local status=""
+
+    [[ -n "${SMOKE_ID}" && -n "${SMOKE_JOB_NAME}" ]] || return 0
+
+    if job_output="$(
+        SYMPHONY_KUBECTL_WRAPPER="${KUBECTL_WRAPPER}" \
+            SYMPHONY_K3S_CONTAINER_NAME="${K3S_CONTAINER_NAME}" \
+            "${REPO_ROOT}/k3s/bin/sjob" status --project-id "${SMOKE_ID}" --job "${SMOKE_JOB_NAME}" --namespace "${K3S_NAMESPACE}" --output json 2>&1
+    )"; then
+        printf '%s\n' "${job_output}" > "${SMOKE_EVIDENCE_PATH}/job-status.json"
+        printf '%s\n' "${job_output}" > "${SMOKE_EVIDENCE_PATH}/job-status-latest.json"
+        status="$(json_file_field "${SMOKE_EVIDENCE_PATH}/job-status.json" "status" 2>/dev/null || true)"
+        printf '%s' "${status:-unknown}"
+    else
+        printf '%s\n' "${job_output}" > "${SMOKE_EVIDENCE_PATH}/job-status-error.txt"
+        printf 'error:%s' "$(compact_output "${job_output}")"
+    fi
+}
+
+capture_smoke_evidence() {
+    local outcome="$1"
+
+    [[ -n "${SMOKE_EVIDENCE_PATH}" ]] || return 0
+    mkdir -p "${SMOKE_EVIDENCE_PATH}"
+
+    cat > "${SMOKE_EVIDENCE_PATH}/summary.txt" <<EOF
+smoke_id: ${SMOKE_ID}
+outcome: ${outcome}
+workflow_id: ${SMOKE_WORKFLOW_ID}
+run_id: ${SMOKE_RUN_ID}
+job_name: ${SMOKE_JOB_NAME}
+temporal_address: $(effective_temporal_address)
+temporal_namespace: ${TEMPORAL_NAMESPACE}
+temporal_task_queue: ${TEMPORAL_TASK_QUEUE}
+k3s_namespace: ${K3S_NAMESPACE}
+project_root: ${SMOKE_PROJECT_ROOT}
+workspace_path: ${SMOKE_WORKSPACE_PATH}
+outputs_path: ${SMOKE_OUTPUTS_PATH}
+EOF
+
+    capture_command_output "${SMOKE_EVIDENCE_PATH}/stack-status.txt" "${SCRIPT_PATH}" status
+    capture_command_output "${SMOKE_EVIDENCE_PATH}/docker-ps.txt" docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+
+    if container_exists "${TEMPORAL_CONTAINER_NAME}"; then
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/temporal-inspect.txt" docker inspect "${TEMPORAL_CONTAINER_NAME}"
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/temporal-logs.txt" docker logs --tail 200 "${TEMPORAL_CONTAINER_NAME}"
+    fi
+
+    if container_exists "${K3S_CONTAINER_NAME}"; then
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/k3s-inspect.txt" docker inspect "${K3S_CONTAINER_NAME}"
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/k3s-logs.txt" docker logs --tail 200 "${K3S_CONTAINER_NAME}"
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/k3s-nodes.txt" with_dev_kubectl get nodes -o wide
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/k3s-namespace.txt" with_dev_kubectl get namespace "${K3S_NAMESPACE}" -o yaml
+    fi
+
+    if [[ -n "${SMOKE_JOB_NAME}" ]]; then
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/k3s-job.txt" with_dev_kubectl get job -n "${K3S_NAMESPACE}" "${SMOKE_JOB_NAME}" -o yaml
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/k3s-pods.txt" with_dev_kubectl get pods -n "${K3S_NAMESPACE}" -l "job-name=${SMOKE_JOB_NAME}" -o wide
+        capture_command_output "${SMOKE_EVIDENCE_PATH}/k3s-job-logs.txt" with_dev_kubectl logs -n "${K3S_NAMESPACE}" "job/${SMOKE_JOB_NAME}" --all-containers=true
+        smoke_job_status >/dev/null || true
+    fi
+
+    if [[ -f "${WORKER_LOG}" ]]; then
+        tail -n 200 "${WORKER_LOG}" > "${SMOKE_EVIDENCE_PATH}/worker-log.txt"
+    fi
+
+    if [[ -d "${SMOKE_PROJECT_ROOT}" ]]; then
+        find "${SMOKE_PROJECT_ROOT}" -maxdepth 4 -type f | sort > "${SMOKE_EVIDENCE_PATH}/project-files.txt"
+    fi
+
+    capture_optional_file "${SMOKE_WORKPAD_PATH}" "${SMOKE_EVIDENCE_PATH}/workpad.md"
+    capture_optional_file "${SMOKE_RESULT_PATH}" "${SMOKE_EVIDENCE_PATH}/run-result.json"
+}
+
+smoke_blocker() {
+    local message="$1"
+
+    capture_smoke_evidence "failed"
+    printf '%s\n' "${message}" > "${SMOKE_EVIDENCE_PATH}/blocker.txt"
+    die "${message}. Evidence: ${SMOKE_EVIDENCE_PATH}"
+}
+
+validate_smoke_artifacts() {
+    python3 - "${SMOKE_RESULT_PATH}" "${SMOKE_WORKPAD_PATH}" <<'PY'
+import json
+import sys
+
+result_path, workpad_path = sys.argv[1], sys.argv[2]
+
+try:
+    with open(result_path, "r", encoding="utf-8") as handle:
+        result = json.load(handle)
+except FileNotFoundError:
+    raise SystemExit(f"missing {result_path}")
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"invalid JSON in {result_path}: {exc}")
+
+required = {
+    "status": "succeeded",
+    "targetState": "Human Review",
+}
+
+for key, expected in required.items():
+    actual = result.get(key)
+    if actual != expected:
+        raise SystemExit(f"{result_path} expected {key}={expected!r}, got {actual!r}")
+
+if not isinstance(result.get("summary"), str) or not result["summary"].strip():
+    raise SystemExit(f"{result_path} is missing a non-empty summary")
+
+validation = result.get("validation")
+if not isinstance(validation, list):
+    raise SystemExit(f"{result_path} validation must be a JSON array")
+
+try:
+    with open(workpad_path, "r", encoding="utf-8") as handle:
+        workpad = handle.read()
+except FileNotFoundError:
+    raise SystemExit(f"missing {workpad_path}")
+
+if "Smoke workflow completed" not in workpad:
+    raise SystemExit(f"{workpad_path} did not record smoke completion")
+PY
+}
+
+classify_smoke_timeout() {
+    local last_status="$1"
+    local job_status=""
+
+    case "${last_status}" in
+        queued | pending)
+            if ! worker_running; then
+                printf 'workflow remained %s because the Temporal worker is not running\n' "${last_status}"
+                return 0
+            fi
+
+            if ! worker_config_matches; then
+                printf 'workflow remained %s because the Temporal worker is running against stale stack settings\n' "${last_status}"
+                return 0
+            fi
+            ;;
+    esac
+
+    if [[ -n "${SMOKE_JOB_NAME}" ]]; then
+        job_status="$(smoke_job_status)"
+        printf 'workflow timed out after %ss; last Temporal status=%s; K3s job %s=%s\n' "${SMOKE_TIMEOUT_SECONDS}" "${last_status:-unknown}" "${SMOKE_JOB_NAME}" "${job_status:-unknown}"
+    else
+        printf 'workflow timed out after %ss; last Temporal status=%s\n' "${SMOKE_TIMEOUT_SECONDS}" "${last_status:-unknown}"
+    fi
+}
+
 cmd_smoke() {
-    cmd_up >/dev/null
+    require_command docker
+    require_command python3
+    ensure_dirs
 
-    local smoke_id="smoke-$(date +%Y%m%d%H%M%S)"
-    local smoke_root="${PROJECT_ROOT}/${smoke_id}"
-    local workspace_path="${smoke_root}/workspace"
-    local outputs_path="${smoke_root}/outputs"
-    local symphony_path="${workspace_path}/.symphony"
-    local prompt_path="${symphony_path}/prompt.md"
-    local workpad_path="${symphony_path}/workpad.md"
-    local result_path="${symphony_path}/run-result.json"
-    local issue_path="${symphony_path}/issue.json"
-    local input_path
-    local status_input_path
-    local workflow_id="smoke/${smoke_id}"
+    local active_temporal_address=""
+    local input_path=""
+    local issue_path=""
+    local prompt_path=""
+    local run_output=""
+    local run_output_path=""
+    local run_response_path=""
+    local run_stderr_path=""
+    local run_status=""
+    local status_input_path=""
+    local status_output=""
+    local status_output_path=""
+    local status_response_path=""
+    local status_stderr_path=""
+    local validation_error=""
+    local workflow_status=""
 
-    mkdir -p "${symphony_path}" "${outputs_path}"
+    SMOKE_ID="smoke-$(date +%Y%m%d%H%M%S)"
+    SMOKE_PROJECT_ROOT="${PROJECT_ROOT}/${SMOKE_ID}"
+    SMOKE_WORKSPACE_PATH="${SMOKE_PROJECT_ROOT}/workspace"
+    SMOKE_OUTPUTS_PATH="${SMOKE_PROJECT_ROOT}/outputs"
+    SMOKE_WORKPAD_PATH="${SMOKE_WORKSPACE_PATH}/.symphony/workpad.md"
+    SMOKE_RESULT_PATH="${SMOKE_WORKSPACE_PATH}/.symphony/run-result.json"
+    SMOKE_WORKFLOW_ID="smoke/${SMOKE_ID}"
+    SMOKE_EVIDENCE_PATH="${SMOKE_PROJECT_ROOT}/evidence"
+
+    local symphony_path="${SMOKE_WORKSPACE_PATH}/.symphony"
+    mkdir -p "${symphony_path}" "${SMOKE_OUTPUTS_PATH}" "${SMOKE_EVIDENCE_PATH}"
+
+    if ! "${SCRIPT_PATH}" up > "${SMOKE_EVIDENCE_PATH}/up.log" 2>&1; then
+        smoke_blocker "stack bootstrap failed: $(compact_output "$(last_nonempty_line "${SMOKE_EVIDENCE_PATH}/up.log")")"
+    fi
+
+    active_temporal_address="$(effective_temporal_address)"
+    prompt_path="${symphony_path}/prompt.md"
+    issue_path="${symphony_path}/issue.json"
+    input_path="${SMOKE_EVIDENCE_PATH}/run-input.json"
+    run_output_path="${SMOKE_EVIDENCE_PATH}/run-response.raw"
+    status_input_path="${SMOKE_EVIDENCE_PATH}/status-input.json"
+    run_response_path="${SMOKE_EVIDENCE_PATH}/run-response.json"
+    run_stderr_path="${SMOKE_EVIDENCE_PATH}/run-stderr.txt"
+    status_output_path="${SMOKE_EVIDENCE_PATH}/status-latest.raw"
+    status_response_path="${SMOKE_EVIDENCE_PATH}/status-history.jsonl"
+    status_stderr_path="${SMOKE_EVIDENCE_PATH}/status-stderr.txt"
 
     cat > "${prompt_path}" <<EOF
-Temporal/K3s smoke workflow for ${smoke_id}.
+Temporal/K3s smoke workflow for ${SMOKE_ID}.
 Write the required Symphony artifacts and exit successfully.
 EOF
 
-    cat > "${workpad_path}" <<'EOF'
+    cat > "${SMOKE_WORKPAD_PATH}" <<'EOF'
 ### Environment
 `pending`
 
@@ -308,17 +857,13 @@ EOF
 EOF
 
     cat > "${issue_path}" <<EOF
-{"id":"${smoke_id}","identifier":"${smoke_id}","title":"Temporal/K3s smoke","state":"In Progress"}
+{"id":"${SMOKE_ID}","identifier":"${SMOKE_ID}","title":"Temporal/K3s smoke","state":"In Progress"}
 EOF
-
-    input_path="$(mktemp)"
-    status_input_path="$(mktemp)"
-    trap 'rm -f "${input_path}" "${status_input_path}"' EXIT
 
     cat > "${input_path}" <<EOF
 {
-  "workflowId": "${workflow_id}",
-  "projectId": "${smoke_id}",
+  "workflowId": "${SMOKE_WORKFLOW_ID}",
+  "projectId": "${SMOKE_ID}",
   "repository": {
     "originUrl": "/opt/symphony",
     "defaultBranch": "main"
@@ -327,14 +872,14 @@ EOF
     "command": "python3 /opt/symphony/dev/smoke_codex.py"
   },
   "temporal": {
-    "address": "${TEMPORAL_ADDRESS}",
+    "address": "${active_temporal_address}",
     "namespace": "${TEMPORAL_NAMESPACE}",
     "taskQueue": "${TEMPORAL_TASK_QUEUE}"
   },
   "k3s": {
     "namespace": "${K3S_NAMESPACE}",
     "image": "${SMOKE_IMAGE}",
-    "projectRoot": "${smoke_root}",
+    "projectRoot": "${SMOKE_PROJECT_ROOT}",
     "sharedCacheRoot": "${SHARED_CACHE_ROOT}",
     "ttlSecondsAfterFinished": 300,
     "defaultCPU": "1",
@@ -343,41 +888,72 @@ EOF
     "runtimeClass": ""
   },
   "issue": {
-    "id": "${smoke_id}",
-    "identifier": "${smoke_id}",
+    "id": "${SMOKE_ID}",
+    "identifier": "${SMOKE_ID}",
     "title": "Temporal/K3s smoke",
     "state": "In Progress"
   },
   "paths": {
-    "projectRoot": "${smoke_root}",
-    "workspacePath": "${workspace_path}",
-    "outputsPath": "${outputs_path}",
+    "projectRoot": "${SMOKE_PROJECT_ROOT}",
+    "workspacePath": "${SMOKE_WORKSPACE_PATH}",
+    "outputsPath": "${SMOKE_OUTPUTS_PATH}",
     "promptPath": "${prompt_path}",
-    "workpadPath": "${workpad_path}",
-    "resultPath": "${result_path}",
+    "workpadPath": "${SMOKE_WORKPAD_PATH}",
+    "resultPath": "${SMOKE_RESULT_PATH}",
     "issuePath": "${issue_path}"
   }
 }
 EOF
 
-    printf '%s\n' "$("${REPO_ROOT}/temporal/bin/symphony" run --input "${input_path}" --output json)"
+    if ! run_output="$("${REPO_ROOT}/temporal/bin/symphony" run --input "${input_path}" --output json 2> "${run_stderr_path}")"; then
+        printf '%s\n' "${run_output}" > "${SMOKE_EVIDENCE_PATH}/run-error.txt"
+        smoke_blocker "$(classify_temporal_command_error "workflow submission" "$(cat "${run_stderr_path}" 2>/dev/null; printf '%s\n' "${run_output}")")"
+    fi
+
+    printf '%s\n' "${run_output}" > "${run_output_path}"
+    if ! extract_json_payload "${run_output_path}" > "${run_response_path}"; then
+        smoke_blocker "workflow submission did not return a JSON payload; see ${run_output_path} and ${run_stderr_path}"
+    fi
+    cat "${run_response_path}"
+
+    SMOKE_RUN_ID="$(json_file_field "${run_response_path}" "runId" 2>/dev/null || true)"
+    SMOKE_JOB_NAME="$(json_file_field "${run_response_path}" "jobName" 2>/dev/null || true)"
+    run_status="$(json_file_field "${run_response_path}" "status" 2>/dev/null || true)"
+
+    [[ -n "${SMOKE_RUN_ID}" ]] || smoke_blocker "workflow submission returned an invalid runId"
+    [[ -n "${SMOKE_JOB_NAME}" ]] || smoke_blocker "workflow submission returned an invalid jobName"
+    [[ "${run_status}" == "running" || "${run_status}" == "queued" ]] ||
+        smoke_blocker "workflow submission returned unexpected status ${run_status:-<empty>}"
 
     cat > "${status_input_path}" <<EOF
-{"workflowId":"${workflow_id}"}
+{"workflowId":"${SMOKE_WORKFLOW_ID}","runId":"${SMOKE_RUN_ID}","temporal":{"address":"${active_temporal_address}","namespace":"${TEMPORAL_NAMESPACE}"}}
 EOF
 
     local deadline=$((SECONDS + SMOKE_TIMEOUT_SECONDS))
-    local status_output=""
+    workflow_status="${run_status}"
+    : > "${status_response_path}"
 
     while ((SECONDS < deadline)); do
-        status_output="$("${REPO_ROOT}/temporal/bin/symphony" status --input "${status_input_path}" --output json)"
+        if ! status_output="$("${REPO_ROOT}/temporal/bin/symphony" status --input "${status_input_path}" --output json 2> "${status_stderr_path}")"; then
+            printf '%s\n' "${status_output}" >> "${SMOKE_EVIDENCE_PATH}/status-errors.txt"
+            smoke_blocker "$(classify_temporal_command_error "status polling" "$(cat "${status_stderr_path}" 2>/dev/null; printf '%s\n' "${status_output}")")"
+        fi
 
-        case "${status_output}" in
-            *'"status":"succeeded"'*)
+        printf '%s\n' "${status_output}" > "${status_output_path}"
+        if ! extract_json_payload "${status_output_path}" > "${SMOKE_EVIDENCE_PATH}/status-latest.json"; then
+            smoke_blocker "status polling did not return a JSON payload; see ${status_output_path}"
+        fi
+
+        cat "${SMOKE_EVIDENCE_PATH}/status-latest.json" >> "${status_response_path}"
+        printf '\n' >> "${status_response_path}"
+        workflow_status="$(json_file_field "${SMOKE_EVIDENCE_PATH}/status-latest.json" "status" 2>/dev/null || true)"
+
+        case "${workflow_status}" in
+            succeeded)
                 break
                 ;;
-            *'"status":"failed"'* | *'"status":"cancelled"'*)
-                die "Smoke workflow ended unsuccessfully: ${status_output}"
+            failed | cancelled)
+                smoke_blocker "workflow ended with status=${workflow_status}; job=${SMOKE_JOB_NAME:-unknown}"
                 ;;
         esac
 
@@ -385,16 +961,17 @@ EOF
     done
 
     if ((SECONDS >= deadline)); then
-        die "Smoke workflow timed out after ${SMOKE_TIMEOUT_SECONDS}s"
+        smoke_blocker "$(classify_smoke_timeout "${workflow_status}")"
     fi
 
-    [[ -f "${result_path}" ]] || die "Smoke workflow did not write ${result_path}"
-    grep -Eq '"status"[[:space:]]*:[[:space:]]*"succeeded"' "${result_path}" || die "Smoke result did not report success"
-    grep -Eq '"targetState"[[:space:]]*:[[:space:]]*"Human Review"' "${result_path}" || die "Smoke result did not set Human Review"
-    grep -q "Smoke workflow completed" "${workpad_path}" || die "Smoke workpad was not updated"
+    if ! validation_error="$(validate_smoke_artifacts 2>&1)"; then
+        smoke_blocker "invalid smoke artifacts: $(compact_output "${validation_error}")"
+    fi
 
+    capture_smoke_evidence "succeeded"
     log "Smoke workflow succeeded"
     printf 'artifacts: %s\n' "${symphony_path}"
+    printf 'evidence: %s\n' "${SMOKE_EVIDENCE_PATH}"
 }
 
 cmd_down() {

@@ -59,7 +59,55 @@ parse_args() {
 }
 
 job_resource_name() {
-    echo "symphony-job-${PROJECT_ID}-${JOB_NAME}"
+    short_kube_value "symphony-job-${PROJECT_ID}-${JOB_NAME}"
+}
+
+safe_name() {
+    local value="$1"
+
+    value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+    value="${value//\//-}"
+    value="${value//_/-}"
+    value="${value//:/-}"
+    value="${value//./-}"
+    value="$(printf '%s' "${value}" | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-+//; s/-+$//')"
+
+    if [[ -z "${value}" ]]; then
+        value="run"
+    fi
+
+    printf '%s' "${value}"
+}
+
+short_kube_value() {
+    local value
+    value="$(safe_name "$1")"
+
+    if ((${#value} <= 63)); then
+        printf '%s' "${value}"
+        return 0
+    fi
+
+    local checksum suffix prefix_limit prefix
+    checksum="$(printf '%s' "${value}" | cksum | awk '{print $1}')"
+    suffix="-${checksum}"
+    prefix_limit=$((63 - ${#suffix}))
+    prefix="${value:0:prefix_limit}"
+    prefix="${prefix%-}"
+
+    if [[ -z "${prefix}" ]]; then
+        prefix="${value:0:prefix_limit}"
+    fi
+
+    printf '%s%s' "${prefix}" "${suffix}"
+}
+
+project_label_value() {
+    short_kube_value "${PROJECT_ID}"
+}
+
+job_label_value() {
+    short_kube_value "${JOB_NAME}"
 }
 
 yaml_double_quote() {
@@ -109,11 +157,14 @@ cmd_run() {
 
     REPO_ROOT="$(cd "${K3S_ROOT}/.." && pwd)"
     prepare_manifest_vars
+    JOB_RESOURCE_NAME="$(job_resource_name)"
+    PROJECT_LABEL_VALUE="$(project_label_value)"
+    JOB_LABEL_VALUE="$(job_label_value)"
     export PROJECT_ID JOB_NAME NAMESPACE IMAGE CPU_REQUEST MEMORY_REQUEST GPU_COUNT RUNTIME_CLASS TTL_SECONDS_AFTER_FINISHED JOB_COMMAND PROJECT_ROOT SHARED_CACHE_ROOT REPO_ROOT
-    export REPO_ROOT
+    export JOB_RESOURCE_NAME PROJECT_LABEL_VALUE JOB_LABEL_VALUE
 
     envsubst < "${K3S_ROOT}/templates/job.yaml" | kubectl_cmd apply -f -
-    log "submitted $(job_resource_name)"
+    log "submitted ${JOB_RESOURCE_NAME}"
 }
 
 cmd_status() {
