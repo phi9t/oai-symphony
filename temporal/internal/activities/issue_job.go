@@ -2,8 +2,6 @@ package activities
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,6 +98,7 @@ const (
 
 var executeExternalCommand = runCommand
 var activityPollInterval = 5 * time.Second
+var posixCksumTable = buildPOSIXCksumTable()
 
 func RunIssueJob(ctx context.Context, input RunInput) (RunResult, error) {
 	if err := validateRunInput(input); err != nil {
@@ -301,27 +300,36 @@ func gpuCount(value int) int {
 }
 
 func safeName(value string) string {
-	value = strings.TrimSpace(value)
+	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		return "run"
 	}
-	replacer := strings.NewReplacer("/", "-", "_", "-", ":", "-", ".", "-")
-	value = replacer.Replace(value)
-	value = strings.Map(func(r rune) rune {
+
+	var builder strings.Builder
+	builder.Grow(len(value))
+	lastWasDash := false
+
+	for _, r := range value {
 		switch {
 		case r >= 'a' && r <= 'z':
-			return r
-		case r >= 'A' && r <= 'Z':
-			return r + ('a' - 'A')
+			builder.WriteRune(r)
+			lastWasDash = false
 		case r >= '0' && r <= '9':
-			return r
-		case r == '-':
-			return r
+			builder.WriteRune(r)
+			lastWasDash = false
 		default:
-			return '-'
+			if !lastWasDash {
+				builder.WriteByte('-')
+				lastWasDash = true
+			}
 		}
-	}, value)
-	return strings.Trim(value, "-")
+	}
+
+	value = strings.Trim(builder.String(), "-")
+	if value == "" {
+		return "run"
+	}
+	return value
 }
 
 func shellEscape(value string) string {
@@ -593,6 +601,9 @@ func boundedSafeName(value string, maxLength int) string {
 	hash := hashedSuffix(value)
 	keep := maxLength - len(hash) - 1
 	if keep < 1 {
+		if len(hash) <= maxLength {
+			return hash
+		}
 		return hash[:maxLength]
 	}
 
@@ -604,8 +615,44 @@ func boundedSafeName(value string, maxLength int) string {
 }
 
 func hashedSuffix(value string) string {
-	sum := sha1.Sum([]byte(value))
-	return hex.EncodeToString(sum[:])[:8]
+	checksum := fmt.Sprintf("%d", posixCksum([]byte(value)))
+	if len(checksum) <= 8 {
+		return checksum
+	}
+	return checksum[:8]
+}
+
+func buildPOSIXCksumTable() [256]uint32 {
+	const polynomial uint32 = 0x04C11DB7
+
+	var table [256]uint32
+	for i := 0; i < len(table); i++ {
+		crc := uint32(i) << 24
+		for bit := 0; bit < 8; bit++ {
+			if crc&0x80000000 != 0 {
+				crc = (crc << 1) ^ polynomial
+			} else {
+				crc <<= 1
+			}
+		}
+		table[i] = crc
+	}
+
+	return table
+}
+
+func posixCksum(data []byte) uint32 {
+	var crc uint32
+
+	for _, b := range data {
+		crc = (crc << 8) ^ posixCksumTable[byte(crc>>24)^b]
+	}
+
+	for length := len(data); length != 0; length >>= 8 {
+		crc = (crc << 8) ^ posixCksumTable[byte(crc>>24)^byte(length&0xff)]
+	}
+
+	return ^crc
 }
 
 func boundaryError(code, message string, retryable bool, cause error) error {

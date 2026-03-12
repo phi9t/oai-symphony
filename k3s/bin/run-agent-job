@@ -14,6 +14,13 @@ mkdir -p "$(dirname "${WORKPAD_PATH}")"
 mkdir -p "$(dirname "${RESULT_PATH}")"
 mkdir -p "${WORKSPACE_PATH}"
 
+git config --global --add safe.directory "${WORKSPACE_PATH}" >/dev/null 2>&1 || true
+
+if [[ -d "${REPOSITORY_ORIGIN_URL}" ]]; then
+    git config --global --add safe.directory "${REPOSITORY_ORIGIN_URL}" >/dev/null 2>&1 || true
+    git config --global --add safe.directory "${REPOSITORY_ORIGIN_URL}/.git" >/dev/null 2>&1 || true
+fi
+
 if [[ ! -d "${WORKSPACE_PATH}/.git" ]]; then
     GIT_CONFIG_COUNT=1 \
     GIT_CONFIG_KEY_0=init.defaultBranch \

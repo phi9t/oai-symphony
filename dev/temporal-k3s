@@ -11,17 +11,20 @@ readonly LOG_ROOT="${STATE_ROOT}/logs"
 readonly WORKER_PID_FILE="${STATE_ROOT}/worker.pid"
 readonly WORKER_LOG="${LOG_ROOT}/worker.log"
 readonly KUBECTL_WRAPPER="${REPO_ROOT}/k3s/bin/docker-kubectl"
+DOCKER_CONFIG="${SYMPHONY_DOCKER_CONFIG:-${STATE_ROOT}/docker-config}"
+BUILDX_CONFIG="${SYMPHONY_DOCKER_BUILDX_CONFIG:-${STATE_ROOT}/docker-buildx}"
+export DOCKER_CONFIG BUILDX_CONFIG
 
 TEMPORAL_CONTAINER_NAME="${SYMPHONY_TEMPORAL_CONTAINER_NAME:-symphony-temporal-dev}"
 K3S_CONTAINER_NAME="${SYMPHONY_K3S_CONTAINER_NAME:-symphony-k3s-dev}"
 PROJECT_ROOT="${SYMPHONY_K3S_PROJECT_ROOT:-${REPO_ROOT}/.symphony/dev/projects}"
 SHARED_CACHE_ROOT="${SYMPHONY_K3S_SHARED_CACHE_ROOT:-${REPO_ROOT}/.symphony/dev/shared-cache}"
 SMOKE_IMAGE="${SYMPHONY_SMOKE_IMAGE:-symphony/smoke-agent:dev}"
-TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:7233}"
+TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:17233}"
 TEMPORAL_NAMESPACE="${TEMPORAL_NAMESPACE:-default}"
 TEMPORAL_TASK_QUEUE="${TEMPORAL_TASK_QUEUE:-symphony}"
 K3S_NAMESPACE="${SYMPHONY_K3S_NAMESPACE:-symphony}"
-TEMPORAL_SERVER_IMAGE="${SYMPHONY_TEMPORAL_SERVER_IMAGE:-temporalio/server}"
+TEMPORAL_SERVER_IMAGE="${SYMPHONY_TEMPORAL_SERVER_IMAGE:-temporalio/temporal:latest}"
 K3S_SERVER_IMAGE="${SYMPHONY_K3S_SERVER_IMAGE:-rancher/k3s}"
 SMOKE_TIMEOUT_SECONDS="${SYMPHONY_SMOKE_TIMEOUT_SECONDS:-180}"
 K3S_API_PORT="${SYMPHONY_K3S_API_PORT:-6445}"
@@ -51,7 +54,7 @@ require_command() {
 }
 
 ensure_dirs() {
-    mkdir -p "${STATE_ROOT}" "${LOG_ROOT}" "${PROJECT_ROOT}" "${SHARED_CACHE_ROOT}"
+    mkdir -p "${STATE_ROOT}" "${LOG_ROOT}" "${PROJECT_ROOT}" "${SHARED_CACHE_ROOT}" "${DOCKER_CONFIG}" "${BUILDX_CONFIG}"
 }
 
 docker_ready() {
@@ -188,7 +191,7 @@ build_smoke_image() {
 }
 
 import_smoke_image() {
-    docker save "${SMOKE_IMAGE}" | docker exec -i "${K3S_CONTAINER_NAME}" k3s ctr images import - >/dev/null
+    docker save "${SMOKE_IMAGE}" | docker exec -i "${K3S_CONTAINER_NAME}" ctr -n k8s.io images import - >/dev/null
     log "Imported smoke agent image into ${K3S_CONTAINER_NAME}"
 }
 
@@ -313,9 +316,9 @@ EOF
 {"id":"${smoke_id}","identifier":"${smoke_id}","title":"Temporal/K3s smoke","state":"In Progress"}
 EOF
 
-    input_path="$(mktemp)"
-    status_input_path="$(mktemp)"
-    trap 'rm -f "${input_path}" "${status_input_path}"' EXIT
+    input_path="$(mktemp "${STATE_ROOT}/smoke-input.XXXXXX.json")"
+    status_input_path="$(mktemp "${STATE_ROOT}/smoke-status.XXXXXX.json")"
+    trap 'rm -f -- "${input_path:-}" "${status_input_path:-}"' EXIT
 
     cat > "${input_path}" <<EOF
 {
@@ -365,23 +368,40 @@ EOF
     printf '%s\n' "$("${REPO_ROOT}/temporal/bin/symphony" run --input "${input_path}" --output json)"
 
     cat > "${status_input_path}" <<EOF
-{"workflowId":"${workflow_id}"}
+{
+  "workflowId": "${workflow_id}",
+  "temporal": {
+    "address": "${TEMPORAL_ADDRESS}",
+    "namespace": "${TEMPORAL_NAMESPACE}",
+    "taskQueue": "${TEMPORAL_TASK_QUEUE}"
+  }
+}
 EOF
 
     local deadline=$((SECONDS + SMOKE_TIMEOUT_SECONDS))
     local status_output=""
 
     while ((SECONDS < deadline)); do
-        status_output="$("${REPO_ROOT}/temporal/bin/symphony" status --input "${status_input_path}" --output json)"
-
-        case "${status_output}" in
-            *'"status":"succeeded"'*)
-                break
-                ;;
-            *'"status":"failed"'* | *'"status":"cancelled"'*)
-                die "Smoke workflow ended unsuccessfully: ${status_output}"
-                ;;
-        esac
+        if status_output="$("${REPO_ROOT}/temporal/bin/symphony" status --input "${status_input_path}" --output json 2>&1)"; then
+            case "${status_output}" in
+                *'"status":"succeeded"'*)
+                    break
+                    ;;
+                *'"status":"failed"'* | *'"status":"cancelled"'*)
+                    die "Smoke workflow ended unsuccessfully: ${status_output}"
+                    ;;
+            esac
+        else
+            case "${status_output}" in
+                *"workflow not found"*)
+                    sleep 3
+                    continue
+                    ;;
+                *)
+                    die "Smoke workflow status check failed: ${status_output}"
+                    ;;
+            esac
+        fi
 
         sleep 3
     done
@@ -390,6 +410,16 @@ EOF
         die "Smoke workflow timed out after ${SMOKE_TIMEOUT_SECONDS}s"
     fi
 
+    local artifact_deadline=$((SECONDS + 15))
+
+    while ((SECONDS < artifact_deadline)); do
+        if [[ -f "${result_path}" ]] && grep -q "Smoke workflow completed" "${workpad_path}" 2>/dev/null; then
+            break
+        fi
+
+        sleep 1
+    done
+
     [[ -f "${result_path}" ]] || die "Smoke workflow did not write ${result_path}"
     grep -Eq '"status"[[:space:]]*:[[:space:]]*"succeeded"' "${result_path}" || die "Smoke result did not report success"
     grep -Eq '"targetState"[[:space:]]*:[[:space:]]*"Human Review"' "${result_path}" || die "Smoke result did not set Human Review"
@@ -397,6 +427,8 @@ EOF
 
     log "Smoke workflow succeeded"
     printf 'artifacts: %s\n' "${symphony_path}"
+    trap - EXIT
+    rm -f -- "${input_path}" "${status_input_path}"
 }
 
 cmd_down() {

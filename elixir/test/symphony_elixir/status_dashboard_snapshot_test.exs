@@ -138,6 +138,32 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     Snapshot.assert_dashboard_snapshot!("backoff_queue", render_snapshot(snapshot_data, 15.4))
   end
 
+  test "dashboard renders runtime readiness blockers" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         runtime: %{
+           execution_backend: "temporal_k3s",
+           ready: false,
+           blockers: [
+             %{
+               "code" => "temporal_worker_missing",
+               "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"default\""
+             }
+           ]
+         },
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+
+    assert rendered =~ "temporal_k3s blocked"
+    assert rendered =~ "no Temporal worker is polling task queue"
+  end
+
   test "backoff queue row escapes escaped newline sequences" do
     snapshot_data =
       {:ok,

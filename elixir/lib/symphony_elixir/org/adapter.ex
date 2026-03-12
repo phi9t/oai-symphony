@@ -14,7 +14,8 @@ defmodule SymphonyElixir.Org.Adapter do
   def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
+  def fetch_issue_states_by_ids(issue_ids),
+    do: client_module().fetch_issue_states_by_ids(issue_ids)
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
@@ -42,6 +43,18 @@ defmodule SymphonyElixir.Org.Adapter do
   @spec replace_workpad(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def replace_workpad(issue_id, content) when is_binary(issue_id) and is_binary(content) do
     client_module().replace_workpad(issue_id, content)
+  end
+
+  @spec deep_dive(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def deep_dive(issue_id, content) when is_binary(issue_id) and is_binary(content) do
+    client_module().deep_dive(issue_id, content)
+  end
+
+  @spec deep_revision(String.t(), String.t(), String.t(), [map()]) ::
+          {:ok, map()} | {:error, term()}
+  def deep_revision(issue_id, mode, content, tasks)
+      when is_binary(issue_id) and is_binary(mode) and is_binary(content) and is_list(tasks) do
+    client_module().deep_revision(issue_id, mode, content, tasks)
   end
 
   defp client_module do

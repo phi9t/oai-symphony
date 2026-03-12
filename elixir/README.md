@@ -78,51 +78,132 @@ When you are done with the remote backend, tear it down with:
 
 ## Repo-local Org workflows
 
-This repository also keeps two local Org workflows under `./.symphony/`:
+This repository keeps three repo-owned Org workflows under `./.symphony/`:
 
-- `local-bootstrap-workflow.md` runs the local backend against the repo's Org queue and is intended
+- `temporal-self-land-workflow.md` is the preferred unattended path on hosts where Temporal/K3s is
+  available. It runs the Org queue through the remote backend, keeps progress in local
+  `.symphony/*` artifacts, and only targets `Done` after a PR is merged and the workpad records
+  both the PR URL and merge commit.
+- `fork-self-land-workflow.md` remains the local fallback. It rewrites each workspace so `origin`
+  points at `git@github.com:phi9t/oai-symphony.git` and requires the repo-local `commit`, `push`,
+  and `land` skills before the task can move to `Done`.
+- `local-bootstrap-workflow.md` runs the local backend against the same Org queue and is intended
   for supervised bootstrap tasks that stop in `Human Review`.
-- `fork-self-land-workflow.md` runs the local backend against the same Org queue, rewrites each
-  workspace so `origin` points at `git@github.com:phi9t/oai-symphony.git`, and requires the
-  repo-local `commit`, `push`, and `land` skills before the task can move to `Done`.
-- The fork workflow also overrides the default Codex runtime settings so agent turns stay
-  workspace-scoped while still allowing networked GitHub operations needed for `push` and `land`.
 
-Start either workflow from the repository root:
+Start any workflow from the repository root:
 
 ```bash
+eval "$(./dev/temporal-k3s env)"
+mise exec -- ./elixir/bin/symphony ./.symphony/temporal-self-land-workflow.md
 mise exec -- ./elixir/bin/symphony ./.symphony/local-bootstrap-workflow.md
 mise exec -- ./elixir/bin/symphony ./.symphony/fork-self-land-workflow.md
 ```
 
+## Org Planning Runs
+
+When a repo-local Org workflow exposes `org_task`, use the planning actions deliberately:
+
+- `org_task.deep_dive` records structural analysis, architecture review, or failure investigation on
+  the current task.
+- `org_task.deep_revision` with `mode: "draft"` records uncertain follow-on work that still needs
+  human discussion.
+- `org_task.deep_revision` with `mode: "create"` should only be used for implementation-ready
+  follow-on tasks. Each proposed task must include a description, acceptance criteria, priority,
+  and validation steps; Symphony creates those tasks as direct children of the configured Org root
+  and inserts an empty `Codex Workpad` heading for each one.
+- If the next work is a major architecture, runtime, or process proposal, stop at an RFC under
+  `docs/rfcs/` until the proposal has review votes and the task boundaries are clear.
+
+Manual Org planning smoke:
+
+1. Create a temporary Org file with a Symphony root heading and one parent task identifier.
+2. Point a temporary workflow at that file and override `tracker.emacsclient_command` to
+   `emacs -Q --batch` so the smoke does not depend on a running Emacs server.
+3. Run `Org.Client.deep_dive/2`, then `Org.Client.deep_revision/4` in `draft` and `create` modes:
+
+```bash
+cd elixir
+mix run --no-start -e '
+tmp = Path.join(System.tmp_dir!(), "symphony-org-planning-smoke-#{System.unique_integer([:positive])}")
+File.mkdir_p!(tmp)
+org_file = Path.join(tmp, "planning.org")
+workflow_file = Path.join(tmp, "WORKFLOW.md")
+
+File.write!(org_file, """
+* Symphony Root
+:PROPERTIES:
+:ID: ROOT-PLANNING
+:END:
+** TODO [#B] Planning parent :planning:
+:PROPERTIES:
+:ID: parent-id
+:SYMPHONY_IDENTIFIER: REV-PLANNING
+:END:
+Parent task description.
+
+*** Codex Workpad
+""")
+
+File.write!(workflow_file, """
+---
+tracker:
+  kind: "orgmode"
+  file: "#{org_file}"
+  root_id: "ROOT-PLANNING"
+  emacsclient_command: "emacs -Q --batch"
+  state_map:
+    BACKLOG: "Backlog"
+    TODO: "Todo"
+    DONE: "Done"
+---
+planning smoke
+""")
+
+:ok = SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+:ok = SymphonyElixir.WorkflowStore.force_reload()
+
+IO.inspect(SymphonyElixir.Org.Client.deep_dive("REV-PLANNING", "### Summary\nStructural review"))
+IO.inspect(SymphonyElixir.Org.Client.deep_revision("REV-PLANNING", "draft", "### Revision Summary\nDraft follow-on work", [%{"title" => "Draft follow-on task", "state" => "Backlog", "priority" => 2, "labels" => ["planning"], "body" => "Draft body\n\n### Acceptance Criteria\n- Decide scope\n\n### Validation / Verification\n- Review with maintainers"}]))
+IO.inspect(SymphonyElixir.Org.Client.deep_revision("REV-PLANNING", "create", "### Revision Summary\nCreate follow-on work", [%{"title" => "Create top-level follow-on task", "state" => "Backlog", "priority" => 1, "labels" => ["planning", "orgmode"], "body" => "Task description\n\n### Acceptance Criteria\n- Task is created at the Org root\n\n### Validation / Verification\n- Inspect the created task"}]))
+'
+```
+
 ## Self-Landing Queue Smoke
 
-Use the fork workflow when you want Symphony to implement the task, push to
-`phi9t/oai-symphony`, land the PR, mark the Org task `Done`, and then clean up the workspace.
+Use the Temporal workflow when you want Symphony to implement the task through Temporal/K3s, push
+to `phi9t/oai-symphony`, land the PR, mark the Org task `Done`, and then clean up the remote
+workspace. Keep the local fork workflow as the fallback when the remote runtime is unavailable.
 
 Run the queue from the repository root:
 
 ```bash
-mise exec -- ./elixir/bin/symphony ./.symphony/fork-self-land-workflow.md
+./dev/temporal-k3s up
+eval "$(./dev/temporal-k3s env)"
+export SYMPHONY_K3S_IMAGE=your-real-agent-image
+mise exec -- ./elixir/bin/symphony ./.symphony/temporal-self-land-workflow.md
 ```
 
 Smoke path:
 
 1. Create a repo task under `.symphony/revision-plan.org` or move an existing task to `Todo`.
-2. Wait for Symphony to claim the task, open a fork PR, and land it through the repo-local
+2. Confirm the dashboard or `/api/v1/state` shows the Temporal/K3s runtime as ready before the
+   task is claimed. If it is blocked, fix the reported worker, namespace, Temporal, or K3s
+   prerequisite first.
+3. Wait for Symphony to claim the task, open a fork PR, and land it through the repo-local
    `commit`, `push`, and `land` skills.
-3. Confirm the Org `Codex Workpad` now includes the PR URL plus merge commit and that the task
+4. Confirm the Org `Codex Workpad` now includes the PR URL plus merge commit and that the task
    state is `Done`.
-4. Confirm the workspace is gone, for example with
-   `find ./.symphony/workspaces -maxdepth 1 -type d -name '<task-identifier>'`.
+5. Confirm the workspace is gone, for example with
+   `find "${SYMPHONY_K3S_PROJECT_ROOT}" -maxdepth 1 -type d -name '<task-identifier>*'`.
 
 Cleanup behavior:
 
 - A successful self-landing run writes `targetState: "Done"` into `.symphony/run-result.json`. Once
-  Symphony observes that terminal state, it removes the matching workspace during terminal-state
-  reconciliation or on the next startup cleanup sweep.
+  Symphony observes that terminal state, it removes the matching remote project root during
+  terminal-state reconciliation or on the next startup cleanup sweep.
 - If the task reaches a terminal state without merge, the configured `hooks.before_remove` command
-  still runs before deletion. In this repository's fork workflow that hook executes
+  still runs before deletion for both local and remote workspaces. In this repository's workflows
+  that hook executes
   `mix workspace.before_remove --repo phi9t/oai-symphony` so any open fork PRs for the branch are
   closed before the workspace disappears.
 
@@ -149,6 +230,15 @@ What each command does:
   artifacts.
 - `down` stops the worker and removes the local Temporal plus K3s containers.
 
+Symphony itself also probes runtime readiness before each claim when `execution.kind:
+temporal_k3s`. The dashboard, `/api/v1/state`, and logs now report whether the runtime is blocked
+by:
+
+- unreachable Temporal
+- a missing Temporal namespace
+- a missing Temporal worker for the configured task queue
+- missing or broken K3s prerequisites such as the namespace or `kubectl` wrapper
+
 Before starting Symphony itself, export the workflow-facing environment that matches the dev stack:
 
 ```bash
@@ -164,10 +254,19 @@ Notes:
   `./dev/temporal-k3s up`.
 - Real agent runs still need `k3s.image` to point at an image that contains `bash`, `git`, and a
   working implementation of your configured `codex.command`.
+- The repo-owned `./.symphony/temporal-self-land-workflow.md` reads `SYMPHONY_K3S_IMAGE`, so set
+  that env var before starting the unattended queue.
 - The default Temporal helper command is now `./temporal/bin/symphony`, which works correctly from
   the repository root.
 - The Temporal worker snapshots remote `.symphony` artifacts into `outputs/<run-id>/` and validates
   `run-result.json` before it cleans up the finished K3s job.
+- The phase-1 remote golden path is governed by
+  [`../docs/operations/phase-1-remote-validation-matrix.md`](../docs/operations/phase-1-remote-validation-matrix.md).
+  Treat that matrix as the source of truth for gate classes, contract authority, owners, and pass
+  evidence when changing the `Org -> Elixir -> Temporal -> K3s -> Org` path.
+- If the worker dies or K3s jobs fail, restart the stack with `./dev/temporal-k3s up`, check
+  `./dev/temporal-k3s status`, and then use the dashboard or `/api/v1/state` to confirm readiness
+  has cleared before letting Symphony claim more work.
 
 ## Configuration
 

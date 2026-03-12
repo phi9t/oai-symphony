@@ -67,6 +67,22 @@ defmodule SymphonyElixir.Execution do
 
   def skip_stall_detection?(_running_entry), do: false
 
+  @spec runtime_status() :: map()
+  def runtime_status do
+    case Config.execution_kind() do
+      "temporal_k3s" ->
+        TemporalK3s.runtime_status()
+
+      kind ->
+        %{
+          execution_backend: kind,
+          ready: true,
+          blockers: [],
+          checked_at: DateTime.utc_now()
+        }
+    end
+  end
+
   defp safe_identifier(identifier) when is_binary(identifier) do
     String.replace(identifier, ~r/[^a-zA-Z0-9._-]/, "_")
   end

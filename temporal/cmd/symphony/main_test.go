@@ -13,6 +13,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
+	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	workflowservice "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -32,9 +33,13 @@ type fakeTemporalClient struct {
 	executeWorkflowID  string
 	executeTaskQueue   string
 	executeWorkflowArg any
+	systemInfoErr      error
+	namespaceErr       error
+	taskQueueResponses map[enumspb.TaskQueueType]*workflowservice.DescribeTaskQueueResponse
+	taskQueueErrors    map[enumspb.TaskQueueType]error
 }
 
-func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ interface{}, args ...interface{}) (client.WorkflowRun, error) {
+func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ any, args ...any) (client.WorkflowRun, error) {
 	f.executeWorkflowID = options.ID
 	f.executeTaskQueue = options.TaskQueue
 
@@ -55,6 +60,30 @@ func (f *fakeTemporalClient) CancelWorkflow(_ context.Context, workflowID string
 	return f.cancelErr
 }
 
+func (f *fakeTemporalClient) GetSystemInfo(_ context.Context) (*workflowservice.GetSystemInfoResponse, error) {
+	if f.systemInfoErr != nil {
+		return nil, f.systemInfoErr
+	}
+	return &workflowservice.GetSystemInfoResponse{}, nil
+}
+
+func (f *fakeTemporalClient) DescribeNamespace(_ context.Context, _ string) (*workflowservice.DescribeNamespaceResponse, error) {
+	if f.namespaceErr != nil {
+		return nil, f.namespaceErr
+	}
+	return &workflowservice.DescribeNamespaceResponse{}, nil
+}
+
+func (f *fakeTemporalClient) DescribeTaskQueue(_ context.Context, _ string, taskQueueType enumspb.TaskQueueType) (*workflowservice.DescribeTaskQueueResponse, error) {
+	if err := f.taskQueueErrors[taskQueueType]; err != nil {
+		return nil, err
+	}
+	if response := f.taskQueueResponses[taskQueueType]; response != nil {
+		return response, nil
+	}
+	return &workflowservice.DescribeTaskQueueResponse{}, nil
+}
+
 func (f *fakeTemporalClient) Close() {}
 
 type fakeWorkflowRun struct {
@@ -70,11 +99,11 @@ func (f fakeWorkflowRun) GetRunID() string {
 	return f.runID
 }
 
-func (f fakeWorkflowRun) Get(_ context.Context, _ interface{}) error {
+func (f fakeWorkflowRun) Get(_ context.Context, _ any) error {
 	return nil
 }
 
-func (f fakeWorkflowRun) GetWithOptions(_ context.Context, _ interface{}, _ client.WorkflowRunGetOptions) error {
+func (f fakeWorkflowRun) GetWithOptions(_ context.Context, _ any, _ client.WorkflowRunGetOptions) error {
 	return nil
 }
 
@@ -109,7 +138,6 @@ func TestRunCommandUsesTemporalConfigFromPayload(t *testing.T) {
 	if fakeClient.executeWorkflowID != "issue/1" {
 		t.Fatalf("expected workflow ID issue/1, got %q", fakeClient.executeWorkflowID)
 	}
-
 	if fakeClient.executeTaskQueue != "symphony" {
 		t.Fatalf("expected task queue symphony, got %q", fakeClient.executeTaskQueue)
 	}
@@ -289,6 +317,115 @@ func TestHelperFixturesExerciseRunStatusCancelAndDescribeContracts(t *testing.T)
 	assertFixtureResponse(t, stdout.Bytes(), "describe-response.json")
 }
 
+func TestReadinessCommandReportsReadyRuntime(t *testing.T) {
+	fakeClient := &fakeTemporalClient{
+		taskQueueResponses: map[enumspb.TaskQueueType]*workflowservice.DescribeTaskQueueResponse{
+			enumspb.TASK_QUEUE_TYPE_WORKFLOW: {
+				Pollers: []*taskqueuepb.PollerInfo{{Identity: "workflow-worker"}},
+			},
+			enumspb.TASK_QUEUE_TYPE_ACTIVITY: {
+				Pollers: []*taskqueuepb.PollerInfo{{Identity: "activity-worker"}},
+			},
+		},
+	}
+
+	var capturedOptions client.Options
+	stdout, _ := installTestHooks(t, fakeClient, &capturedOptions)
+
+	home := t.TempDir()
+	writeExecutable(t, filepath.Join(home, "k3s", "bin", "sjob"), "#!/bin/sh\nexit 0\n")
+
+	kubectlWrapper := filepath.Join(home, "kubectl-wrapper.sh")
+	writeExecutable(t, kubectlWrapper, "#!/bin/sh\necho symphony\n")
+
+	t.Setenv("SYMPHONY_HOME", home)
+	t.Setenv("SYMPHONY_KUBECTL_WRAPPER", kubectlWrapper)
+
+	inputPath := writeJSONInput(t, readinessInput{
+		Temporal: activities.TemporalConfig{
+			Address:   "temporal.example:7233",
+			Namespace: "customer-a",
+			TaskQueue: "symphony",
+		},
+		K3s: activities.K3sConfig{Namespace: "symphony"},
+	})
+
+	if err := readinessCommand([]string{"--input", inputPath, "--output", "json"}); err != nil {
+		t.Fatalf("readinessCommand returned error: %v", err)
+	}
+
+	assertDialOptions(t, capturedOptions)
+
+	var payload readinessPayload
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unable to decode readiness JSON: %v", err)
+	}
+
+	if !payload.Ready {
+		t.Fatalf("expected readiness payload to be ready, got %#v", payload)
+	}
+	if payload.Temporal.WorkflowPollers != 1 || payload.Temporal.ActivityPollers != 1 || !payload.Temporal.WorkerReady {
+		t.Fatalf("unexpected Temporal readiness payload: %#v", payload.Temporal)
+	}
+	if !payload.K3s.NamespaceReady || payload.K3s.LauncherPath == "" || payload.K3s.KubectlCommand == "" {
+		t.Fatalf("unexpected K3s readiness payload: %#v", payload.K3s)
+	}
+}
+
+func TestReadinessCommandReportsSpecificBlockers(t *testing.T) {
+	fakeClient := &fakeTemporalClient{
+		taskQueueResponses: map[enumspb.TaskQueueType]*workflowservice.DescribeTaskQueueResponse{
+			enumspb.TASK_QUEUE_TYPE_WORKFLOW: {},
+			enumspb.TASK_QUEUE_TYPE_ACTIVITY: {},
+		},
+	}
+
+	var capturedOptions client.Options
+	stdout, _ := installTestHooks(t, fakeClient, &capturedOptions)
+
+	home := t.TempDir()
+	writeExecutable(t, filepath.Join(home, "k3s", "bin", "sjob"), "#!/bin/sh\nexit 0\n")
+
+	kubectlWrapper := filepath.Join(home, "kubectl-wrapper.sh")
+	writeExecutable(t, kubectlWrapper, "#!/bin/sh\nprintf '%s\\n' 'Error from server (NotFound): namespaces \"symphony\" not found' >&2\nexit 1\n")
+
+	t.Setenv("SYMPHONY_HOME", home)
+	t.Setenv("SYMPHONY_KUBECTL_WRAPPER", kubectlWrapper)
+
+	inputPath := writeJSONInput(t, readinessInput{
+		Temporal: activities.TemporalConfig{
+			Address:   "temporal.example:7233",
+			Namespace: "customer-a",
+			TaskQueue: "symphony",
+		},
+		K3s: activities.K3sConfig{Namespace: "symphony"},
+	})
+
+	if err := readinessCommand([]string{"--input", inputPath, "--output", "json"}); err != nil {
+		t.Fatalf("readinessCommand returned error: %v", err)
+	}
+
+	assertDialOptions(t, capturedOptions)
+
+	var payload readinessPayload
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unable to decode readiness JSON: %v", err)
+	}
+
+	if payload.Ready {
+		t.Fatalf("expected readiness payload to be blocked, got %#v", payload)
+	}
+
+	codes := map[string]bool{}
+	for _, blocker := range payload.Blockers {
+		codes[blocker.Code] = true
+	}
+
+	if !codes["temporal_worker_missing"] || !codes["k3s_namespace_missing"] {
+		t.Fatalf("expected worker and namespace blockers, got %#v", payload.Blockers)
+	}
+}
+
 func TestWriteCLIErrorUsesStableFailureEnvelope(t *testing.T) {
 	fakeClient := &fakeTemporalClient{
 		describeErr: serviceerror.NewUnavailable("temporarily unavailable"),
@@ -387,7 +524,6 @@ func writeJSONInput(t *testing.T, payload any) string {
 	if err != nil {
 		t.Fatalf("unable to encode test input: %v", err)
 	}
-
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("unable to write test input: %v", err)
 	}
@@ -415,7 +551,6 @@ func assertDialOptions(t *testing.T, options client.Options) {
 	if options.HostPort != "temporal.example:7233" {
 		t.Fatalf("expected HostPort temporal.example:7233, got %q", options.HostPort)
 	}
-
 	if options.Namespace != "customer-a" {
 		t.Fatalf("expected Namespace customer-a, got %q", options.Namespace)
 	}
@@ -457,4 +592,15 @@ func readFixtureEnvelope(t *testing.T, fixtureName string) contracts.ErrorEnvelo
 		t.Fatalf("unable to decode fixture %s: %v", fixtureName, err)
 	}
 	return envelope
+}
+
+func writeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("unable to create parent dir for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("unable to write executable %s: %v", path, err)
+	}
 }

@@ -173,7 +173,6 @@ cmd_run() {
     [[ -n "${JOB_COMMAND}" ]] || die "missing job command"
     validate_non_negative_integer "${GPU_COUNT}" || die "gpu-count must be a non-negative integer"
 
-    ensure_dirs "${PROJECT_ROOT}"
     validate_run_paths
     check_kubectl
     check_envsubst
@@ -181,10 +180,9 @@ cmd_run() {
     REPO_ROOT="$(cd "${K3S_ROOT}/.." && pwd)"
     prepare_manifest_vars
     export PROJECT_ID JOB_NAME NAMESPACE IMAGE CPU_REQUEST MEMORY_REQUEST GPU_COUNT RUNTIME_CLASS TTL_SECONDS_AFTER_FINISHED JOB_COMMAND PROJECT_ROOT SHARED_CACHE_ROOT REPO_ROOT
-    export REPO_ROOT
 
     envsubst < "${K3S_ROOT}/templates/job.yaml" | kubectl_cmd apply -f -
-    log "submitted $(job_resource_name)"
+    log "submitted ${RESOURCE_NAME}"
 }
 
 cmd_status() {

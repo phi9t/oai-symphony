@@ -70,24 +70,30 @@ No workpad exists yet.
 
 1. Act autonomously. Do not ask a human to perform follow-up work.
 2. Use the `org_task` tool to read and replace the workpad as you progress.
-3. Keep the workpad current with these sections:
+3. Use `org_task.deep_dive` when you need to capture a structural analysis, failure investigation, or architecture review in the task itself.
+4. Use `org_task.deep_revision` when your work reveals follow-on tasks. Use `mode: "create"` only when the new work is clear and actionable; use `mode: "draft"` when uncertainty is still high and the proposal should be discussed first. Every proposed task must include title, description, acceptance criteria, priority, and validation, and created tasks should start with an empty `Codex Workpad`.
+5. For major architecture, runtime, or process proposals, create or update an RFC in `docs/rfcs/` before spawning implementation tasks. Only convert accepted RFCs into Org tasks.
+6. Keep the workpad current with these sections:
    - `Environment`
    - `Plan`
    - `Acceptance Criteria`
    - `Validation`
    - `Notes`
-4. Reproduce or inspect the current failure before editing code.
-5. Run concrete validation before ending the turn.
-6. Only set the task to `Human Review` when the task is actually ready for review.
-7. If blocked or only partially complete, leave the task in an active state or move it to `Rework` with a precise blocker.
+7. Reproduce or inspect the current failure before editing code.
+8. Run concrete validation before ending the turn.
+9. Only set the task to `Human Review` when the task is actually ready for review.
+10. If blocked or only partially complete, leave the task in an active state or move it to `Rework` with a precise blocker.
 
 ## Expected workflow
 
 1. Call `org_task` with `get_task` or `get_workpad`.
 2. Update the workpad with a real plan and validation checklist.
 3. Inspect the repo, implement needed changes, and keep the workpad synced.
-4. Validate the result.
-5. Set the final state with `org_task.set_state`.
+4. If the work uncovers architecture findings, capture them with `org_task.deep_dive`.
+5. If the work becomes a major proposal rather than a direct fix, write an RFC in `docs/rfcs/` and keep task creation behind RFC review.
+6. If the work reveals new actionable issues, call `org_task.deep_revision` with a detailed task list that includes description, acceptance criteria, priority, and validation for each task.
+7. Validate the result.
+8. Set the final state with `org_task.set_state`.
 
 ## Workpad template
 
