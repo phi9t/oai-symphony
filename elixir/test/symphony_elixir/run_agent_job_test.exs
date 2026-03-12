@@ -58,8 +58,10 @@ defmodule SymphonyElixir.RunAgentJobTest do
       )
 
     assert output =~ "origin/main"
+
     assert String.trim_trailing(File.read!(Path.join([workspace, ".symphony", "prompt-capture.txt"]))) ==
              "prompt from controller"
+
     assert String.trim_trailing(File.read!(prompt_path)) == "prompt from controller"
     assert String.trim_trailing(File.read!(workpad_path)) == "workpad from controller"
     assert File.read!(issue_path) == ~s({"id":"smoke"})
