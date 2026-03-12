@@ -69,9 +69,9 @@ To smoke the self-landing queue in this repository without the remote stack, sta
 task through implementation, fork PR creation, merge, and `Done`. After the merge is recorded in
 the Org workpad, Symphony removes the matching workspace on the next terminal cleanup pass; if a
 task reaches a terminal state without merge, the `before_remove` hook closes any leftover fork PRs
-before deleting the workspace. Remote runs also bound repeated Temporal status-check failures by
-`codex.stall_timeout_ms`, fail the attempt if the final Org sync cannot be written back, and start
-each retry in a fresh Temporal workflow/K3s job attempt instead of reusing the prior remote IDs.
+before deleting the workspace. The observability API/dashboard also exposes the active remote
+workflow/run/job identifiers, artifact directory, last successful status poll, last Org sync
+result, and stable failure code when those fields are available.
 The Temporal helper emits readiness metadata on its JSON `run`, `status`, `cancel`, and
 `describe` payloads, reports failures through a stable JSON error envelope, and the worker copies
 remote `.symphony` artifacts into `outputs/<run-id>/` before cleaning up the finished K3s job.

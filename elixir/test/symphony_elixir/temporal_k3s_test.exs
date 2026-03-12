@@ -1300,6 +1300,132 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert_receive {:org_set_task_state_called, "issue-org-sync", "Done"}
   end
 
+  test "TemporalK3s accepts default target states inferred from blocked run results" do
+    Application.put_env(:symphony_elixir, :org_client_module, FakeOrgClient)
+
+    k3s_project_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-temporal-default-target-state-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(k3s_project_root)
+    on_exit(fn -> File.rm_rf(k3s_project_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_file: "/tmp/revision-plan.org",
+      tracker_root_id: "root-id",
+      execution_kind: "temporal_k3s",
+      repository_origin_url: "https://example.com/repo.git",
+      temporal_address: "temporal.example:7233",
+      temporal_namespace: "customer-a",
+      temporal_status_poll_ms: 1,
+      k3s_project_root: k3s_project_root
+    )
+
+    issue = %Issue{
+      id: "issue-default-target-state",
+      identifier: "REV-18",
+      title: "Infer Rework from blocked result",
+      description: "Use blockedReason when targetState is omitted",
+      state: "In Progress"
+    }
+
+    final_workpad = """
+    ### Environment
+    `remote:/workspace@abc123`
+
+    ### Plan
+    - [x] Infer a fallback Org state from the run result
+
+    ### Acceptance Criteria
+    - [x] Blocked results move the task to Rework
+
+    ### Validation
+    - [x] direct ExUnit regression
+
+    ### Notes
+    - targetState intentionally omitted
+    """
+
+    {:ok, runner_state} =
+      Agent.start_link(fn ->
+        %{workpad_path: nil, result_path: nil, workspace_path: nil, outputs_path: nil}
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(runner_state) do
+        Agent.stop(runner_state)
+      end
+    end)
+
+    runner = fn _command, subcommand, payload ->
+      case subcommand do
+        "run" ->
+          Agent.update(runner_state, fn state ->
+            %{
+              state
+              | workpad_path: get_in(payload, ["paths", "workpadPath"]),
+                result_path: get_in(payload, ["paths", "resultPath"]),
+                workspace_path: get_in(payload, ["paths", "workspacePath"]),
+                outputs_path: get_in(payload, ["paths", "outputsPath"])
+            }
+          end)
+
+          {:ok,
+           Jason.encode!(%{
+             "workflowId" => "issue/issue-default-target-state",
+             "runId" => "run-001",
+             "status" => "queued",
+             "projectId" => Map.get(payload, "projectId"),
+             "workspacePath" => get_in(payload, ["paths", "workspacePath"]),
+             "artifactDir" => get_in(payload, ["paths", "outputsPath"]),
+             "jobName" => "symphony-job-issue-default-target-state"
+           })}
+
+        "status" ->
+          %{
+            workpad_path: workpad_path,
+            result_path: result_path,
+            workspace_path: workspace_path,
+            outputs_path: outputs_path
+          } =
+            Agent.get(runner_state, & &1)
+
+          File.write!(workpad_path, final_workpad)
+
+          File.write!(
+            result_path,
+            Jason.encode!(%{
+              "status" => "failed",
+              "summary" => "Needs follow-up before the next attempt.",
+              "validation" => ["direct ExUnit regression"],
+              "blockedReason" => "waiting on artifact contract",
+              "needsContinuation" => false
+            })
+          )
+
+          {:ok,
+           Jason.encode!(%{
+             "workflowId" => "issue/issue-default-target-state",
+             "runId" => "run-001",
+             "status" => "failed",
+             "projectId" => Map.get(payload, "projectId"),
+             "workspacePath" => workspace_path,
+             "artifactDir" => outputs_path,
+             "jobName" => "symphony-job-issue-default-target-state"
+           })}
+      end
+    end
+
+    assert :ok = TemporalK3s.run(issue, self(), runner: runner)
+
+    assert_receive {:org_get_workpad_called, "issue-default-target-state"}
+    assert_receive {:org_replace_workpad_called, "issue-default-target-state", ^final_workpad}
+    assert_receive {:org_set_task_state_called, "issue-default-target-state", "Rework"}
+  end
+
   test "TemporalK3s cancel propagates configured Temporal connection settings" do
     write_workflow_file!(Workflow.workflow_file_path(),
       execution_kind: "temporal_k3s",
@@ -1415,6 +1541,7 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert snapshot_entry.artifact_dir == "/tmp/remote/rev-12/outputs"
     assert snapshot_entry.job_name == "symphony-job-rev-12"
     assert snapshot_entry.last_execution_status == "running"
+    assert snapshot_entry.last_successful_status_poll_at == now
     assert snapshot_entry.turn_count == 1
 
     assert {:ok, payload} = Presenter.issue_payload("REV-12", orchestrator_name, 100)
@@ -1428,6 +1555,95 @@ defmodule SymphonyElixir.TemporalK3sTest do
     assert payload.running.artifact_dir == "/tmp/remote/rev-12/outputs"
     assert payload.running.job_name == "symphony-job-rev-12"
     assert payload.running.last_execution_status == "running"
+
+    assert payload.running.last_successful_status_poll ==
+             now |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+  end
+
+  test "orchestrator snapshots and presenter keep remote retry health metadata" do
+    issue_id = "issue-remote-retry-health"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "REV-16",
+      title: "Remote retry health",
+      description: "Preserve remote failure metadata during retry backoff",
+      state: "In Progress",
+      url: "https://example.org/issues/REV-16"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :RemoteRetryHealthOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    last_status_ok_at = DateTime.utc_now()
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 2,
+          timer_ref: nil,
+          retry_token: make_ref(),
+          due_at_ms: System.monotonic_time(:millisecond) + 5_000,
+          identifier: issue.identifier,
+          error: "agent exited: remote Org sync failed",
+          execution_backend: "temporal_k3s",
+          workflow_id: "issue/issue-remote-retry-health",
+          workflow_run_id: "run-007",
+          project_id: "rev-16",
+          workspace_path: "/tmp/remote/rev-16/workspace",
+          artifact_dir: "/tmp/remote/rev-16/artifacts",
+          job_name: "symphony-job-rev-16",
+          last_execution_status: "failed",
+          last_successful_status_poll_at: last_status_ok_at,
+          last_known_org_sync_result: %{step: "state", status: "error", target_state: "Done"},
+          failure_code: "org_state_sync_failed"
+        }
+      })
+    end)
+
+    assert %{retrying: [snapshot_entry]} = Orchestrator.snapshot(orchestrator_name, 100)
+    assert snapshot_entry.execution_backend == "temporal_k3s"
+    assert snapshot_entry.workflow_id == "issue/issue-remote-retry-health"
+    assert snapshot_entry.workflow_run_id == "run-007"
+    assert snapshot_entry.job_name == "symphony-job-rev-16"
+    assert snapshot_entry.artifact_dir == "/tmp/remote/rev-16/artifacts"
+    assert snapshot_entry.last_successful_status_poll_at == last_status_ok_at
+
+    assert snapshot_entry.last_known_org_sync_result == %{
+             step: "state",
+             status: "error",
+             target_state: "Done"
+           }
+
+    assert snapshot_entry.failure_code == "org_state_sync_failed"
+
+    assert {:ok, payload} = Presenter.issue_payload("REV-16", orchestrator_name, 100)
+    assert payload.status == "retrying"
+    assert payload.workspace.path == "/tmp/remote/rev-16/workspace"
+    assert payload.retry.execution_backend == "temporal_k3s"
+    assert payload.retry.workflow_id == "issue/issue-remote-retry-health"
+    assert payload.retry.workflow_run_id == "run-007"
+    assert payload.retry.job_name == "symphony-job-rev-16"
+    assert payload.retry.artifact_dir == "/tmp/remote/rev-16/artifacts"
+
+    assert payload.retry.last_successful_status_poll ==
+             last_status_ok_at |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+    assert payload.retry.last_known_org_sync_result == %{
+             step: "state",
+             status: "error",
+             target_state: "Done"
+           }
+
+    assert payload.retry.failure_code == "org_state_sync_failed"
   end
 
   test "remote cleanup removes all temporal project workspaces after completion" do

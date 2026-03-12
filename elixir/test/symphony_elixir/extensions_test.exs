@@ -535,6 +535,222 @@ defmodule SymphonyElixir.ExtensionsTest do
              json_response(conn, 202)
   end
 
+  test "phoenix observability api exposes remote health metadata for running and retrying issues" do
+    last_status_ok_at = ~U[2026-03-12 12:34:56Z]
+
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-remote",
+          identifier: "REV-REMOTE",
+          state: "In Progress",
+          session_id: "issue/issue-remote/run-003",
+          execution_backend: "temporal_k3s",
+          workflow_id: "issue/issue-remote",
+          workflow_run_id: "run-003",
+          project_id: "rev-remote",
+          workspace_path: "/tmp/remote/rev-remote/workspace",
+          artifact_dir: "/tmp/remote/rev-remote/artifacts",
+          job_name: "symphony-job-rev-remote",
+          last_execution_status: "running",
+          last_successful_status_poll_at: last_status_ok_at,
+          turn_count: 2,
+          codex_app_server_pid: nil,
+          last_codex_message: "remote rendered",
+          last_codex_timestamp: nil,
+          last_codex_event: :notification,
+          codex_input_tokens: 5,
+          codex_output_tokens: 7,
+          codex_total_tokens: 12,
+          started_at: ~U[2026-03-12 12:00:00Z]
+        }
+      ],
+      retrying: [
+        %{
+          issue_id: "issue-remote-retry",
+          identifier: "REV-REMOTE-RETRY",
+          attempt: 3,
+          due_in_ms: 2_000,
+          error: "agent exited: remote Org sync failed",
+          execution_backend: "temporal_k3s",
+          workflow_id: "issue/issue-remote-retry",
+          workflow_run_id: "run-008",
+          project_id: "rev-remote-retry",
+          workspace_path: "/tmp/remote/rev-remote-retry/workspace",
+          artifact_dir: "/tmp/remote/rev-remote-retry/artifacts",
+          job_name: "symphony-job-rev-remote-retry",
+          last_execution_status: "failed",
+          last_successful_status_poll_at: last_status_ok_at,
+          last_known_org_sync_result: %{step: "state", status: "error", target_state: "Done"},
+          failure_code: "org_state_sync_failed"
+        }
+      ],
+      codex_totals: %{input_tokens: 5, output_tokens: 7, total_tokens: 12, seconds_running: 8.5},
+      rate_limits: %{"primary" => %{"remaining" => 9}}
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :RemoteHealthApiOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert state_payload["running"] == [
+             %{
+               "issue_id" => "issue-remote",
+               "issue_identifier" => "REV-REMOTE",
+               "state" => "In Progress",
+               "session_id" => "issue/issue-remote/run-003",
+               "execution_backend" => "temporal_k3s",
+               "workflow_id" => "issue/issue-remote",
+               "workflow_run_id" => "run-003",
+               "project_id" => "rev-remote",
+               "workspace_path" => "/tmp/remote/rev-remote/workspace",
+               "artifact_dir" => "/tmp/remote/rev-remote/artifacts",
+               "job_name" => "symphony-job-rev-remote",
+               "last_execution_status" => "running",
+               "last_successful_status_poll" => "2026-03-12T12:34:56Z",
+               "turn_count" => 2,
+               "last_event" => "notification",
+               "last_message" => "remote rendered",
+               "started_at" => "2026-03-12T12:00:00Z",
+               "last_event_at" => nil,
+               "tokens" => %{"input_tokens" => 5, "output_tokens" => 7, "total_tokens" => 12}
+             }
+           ]
+
+    assert state_payload["retrying"] == [
+             %{
+               "issue_id" => "issue-remote-retry",
+               "issue_identifier" => "REV-REMOTE-RETRY",
+               "attempt" => 3,
+               "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
+               "error" => "agent exited: remote Org sync failed",
+               "execution_backend" => "temporal_k3s",
+               "workflow_id" => "issue/issue-remote-retry",
+               "workflow_run_id" => "run-008",
+               "project_id" => "rev-remote-retry",
+               "workspace_path" => "/tmp/remote/rev-remote-retry/workspace",
+               "artifact_dir" => "/tmp/remote/rev-remote-retry/artifacts",
+               "job_name" => "symphony-job-rev-remote-retry",
+               "last_execution_status" => "failed",
+               "last_successful_status_poll" => "2026-03-12T12:34:56Z",
+               "last_known_org_sync_result" => %{
+                 "step" => "state",
+                 "status" => "error",
+                 "target_state" => "Done"
+               },
+               "failure_code" => "org_state_sync_failed"
+             }
+           ]
+
+    issue_payload = json_response(get(build_conn(), "/api/v1/REV-REMOTE-RETRY"), 200)
+
+    assert issue_payload == %{
+             "issue_identifier" => "REV-REMOTE-RETRY",
+             "issue_id" => "issue-remote-retry",
+             "status" => "retrying",
+             "workspace" => %{"path" => "/tmp/remote/rev-remote-retry/workspace"},
+             "attempts" => %{"restart_count" => 2, "current_retry_attempt" => 3},
+             "running" => nil,
+             "retry" => %{
+               "attempt" => 3,
+               "due_at" => issue_payload["retry"]["due_at"],
+               "error" => "agent exited: remote Org sync failed",
+               "execution_backend" => "temporal_k3s",
+               "workflow_id" => "issue/issue-remote-retry",
+               "workflow_run_id" => "run-008",
+               "project_id" => "rev-remote-retry",
+               "workspace_path" => "/tmp/remote/rev-remote-retry/workspace",
+               "artifact_dir" => "/tmp/remote/rev-remote-retry/artifacts",
+               "job_name" => "symphony-job-rev-remote-retry",
+               "last_execution_status" => "failed",
+               "last_successful_status_poll" => "2026-03-12T12:34:56Z",
+               "last_known_org_sync_result" => %{
+                 "step" => "state",
+                 "status" => "error",
+                 "target_state" => "Done"
+               },
+               "failure_code" => "org_state_sync_failed"
+             },
+             "logs" => %{"codex_session_logs" => []},
+             "recent_events" => [],
+             "last_error" => "agent exited: remote Org sync failed",
+             "tracked" => %{}
+           }
+  end
+
+  test "Presenter handles unavailable issue snapshots and mixed running plus retry state" do
+    orchestrator_name = Module.concat(__MODULE__, :PresenterMixedStateOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: %{
+          running: [
+            %{
+              issue_id: "issue-dual",
+              identifier: "REV-DUAL",
+              state: "In Progress",
+              session_id: "thread-dual",
+              turn_count: 0,
+              codex_app_server_pid: nil,
+              last_codex_message: nil,
+              last_codex_timestamp: nil,
+              last_codex_event: nil,
+              codex_input_tokens: 0,
+              codex_output_tokens: 0,
+              codex_total_tokens: 0,
+              started_at: ~U[2026-03-12 13:00:00Z]
+            }
+          ],
+          retrying: [
+            %{
+              issue_id: "issue-dual",
+              identifier: "REV-DUAL",
+              attempt: 1,
+              due_in_ms: nil,
+              error: "waiting on follow-up"
+            }
+          ],
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 1.0},
+          rate_limits: nil
+        },
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    assert {:ok, payload} =
+             SymphonyElixirWeb.Presenter.issue_payload("REV-DUAL", orchestrator_name, 50)
+
+    assert payload.status == "running"
+    assert payload.running.last_message == nil
+    assert payload.retry.due_at == nil
+
+    assert {:error, :issue_not_found} =
+             SymphonyElixirWeb.Presenter.issue_payload(
+               "REV-DUAL",
+               Module.concat(__MODULE__, :MissingPresenterIssueOrchestrator),
+               5
+             )
+  end
+
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
     unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
     start_test_endpoint(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)

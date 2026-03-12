@@ -324,8 +324,7 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
     case {normalized_workflow_status(status), run_result} do
       {status_name, %{} = result} when status_name in ["succeeded", "failed", "cancelled"] ->
-        if allowed_target_state?(Map.get(result, "targetState")) or
-             Map.has_key?(result, "needsContinuation") do
+        if allowed_target_state?(target_state_from_run_result(result)) do
           :ok
         else
           raise RuntimeError,
@@ -383,20 +382,19 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
     end
   end
 
-  defp maybe_sync_org_state!(target_state, issue, issue_id) do
-    if allowed_target_state?(target_state) do
-      case Tracker.update_issue_state(issue_id, target_state) do
-        :ok ->
-          :ok
+  defp maybe_sync_org_state!(target_state, issue, issue_id)
+       when target_state in ["In Progress", "Human Review", "Rework", "Done"] do
+    case Tracker.update_issue_state(issue_id, target_state) do
+      :ok ->
+        :ok
 
-        {:error, reason} ->
-          raise RuntimeError,
-                "Temporal/K3s failed to sync Org state=#{target_state} for #{issue_context(issue)}: #{inspect(reason)}"
-      end
-    else
-      :ok
+      {:error, reason} ->
+        raise RuntimeError,
+              "Temporal/K3s failed to sync Org state=#{target_state} for #{issue_context(issue)}: #{inspect(reason)}"
     end
   end
+
+  defp maybe_sync_org_state!(_target_state, _issue, _issue_id), do: :ok
 
   defp default_target_state(result) do
     cond do
@@ -414,8 +412,6 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   defp allowed_target_state?(state) when is_binary(state) do
     state in ["In Progress", "Human Review", "Rework", "Done"]
   end
-
-  defp allowed_target_state?(_state), do: false
 
   defp emit_session_started(recipient, issue, project, run) when is_pid(recipient) do
     send(recipient, {:codex_worker_update, issue.id, session_started_payload(project, run)})

@@ -14,6 +14,19 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @retry_health_metadata_fields [
+    :execution_backend,
+    :workflow_id,
+    :workflow_run_id,
+    :project_id,
+    :workspace_path,
+    :artifact_dir,
+    :job_name,
+    :last_execution_status,
+    :last_successful_status_poll_at,
+    :last_known_org_sync_result,
+    :failure_code
+  ]
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -147,10 +160,13 @@ defmodule SymphonyElixir.Orchestrator do
 
               next_attempt = next_retry_attempt_from_running(running_entry)
 
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}"
-              })
+              retry_metadata =
+                %{identifier: running_entry.identifier, error: "agent exited: #{inspect(reason)}"}
+                |> merge_retry_health_metadata(running_entry)
+                |> maybe_put_failure_code(Map.get(running_entry, :failure_code) || failure_code_from_reason(reason))
+                |> maybe_put_last_known_org_sync_result(Map.get(running_entry, :last_known_org_sync_result) || org_sync_result_from_reason(reason))
+
+              schedule_issue_retry(state, issue_id, next_attempt, retry_metadata)
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -501,12 +517,17 @@ defmodule SymphonyElixir.Orchestrator do
 
       next_attempt = next_retry_attempt_from_running(running_entry)
 
+      retry_metadata =
+        %{
+          identifier: identifier,
+          error: "stalled for #{elapsed_ms}ms without codex activity"
+        }
+        |> merge_retry_health_metadata(running_entry)
+        |> maybe_put_failure_code("worker_stalled")
+
       state
       |> terminate_running_issue(issue_id, false)
-      |> schedule_issue_retry(issue_id, next_attempt, %{
-        identifier: identifier,
-        error: "stalled for #{elapsed_ms}ms without codex activity"
-      })
+      |> schedule_issue_retry(issue_id, next_attempt, retry_metadata)
     else
       state
     end
@@ -726,6 +747,9 @@ defmodule SymphonyElixir.Orchestrator do
             artifact_dir: nil,
             job_name: nil,
             last_execution_status: nil,
+            last_successful_status_poll_at: nil,
+            last_known_org_sync_result: nil,
+            failure_code: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
             last_codex_event: nil,
@@ -808,27 +832,28 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
 
+    retry_entry =
+      metadata
+      |> Map.drop([:attempt, :timer_ref, :retry_token, :due_at_ms])
+      |> Map.put(:identifier, identifier)
+      |> Map.put(:error, error)
+      |> Map.merge(%{
+        attempt: next_attempt,
+        timer_ref: timer_ref,
+        retry_token: retry_token,
+        due_at_ms: due_at_ms
+      })
+
     %{
       state
-      | retry_attempts:
-          Map.put(state.retry_attempts, issue_id, %{
-            attempt: next_attempt,
-            timer_ref: timer_ref,
-            retry_token: retry_token,
-            due_at_ms: due_at_ms,
-            identifier: identifier,
-            error: error
-          })
+      | retry_attempts: Map.put(state.retry_attempts, issue_id, retry_entry)
     }
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
-        metadata = %{
-          identifier: Map.get(retry_entry, :identifier),
-          error: Map.get(retry_entry, :error)
-        }
+        metadata = Map.drop(retry_entry, [:attempt, :timer_ref, :retry_token, :due_at_ms])
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
 
@@ -1052,6 +1077,9 @@ defmodule SymphonyElixir.Orchestrator do
           artifact_dir: Map.get(metadata, :artifact_dir),
           job_name: Map.get(metadata, :job_name),
           last_execution_status: Map.get(metadata, :last_execution_status),
+          last_successful_status_poll_at: Map.get(metadata, :last_successful_status_poll_at),
+          last_known_org_sync_result: Map.get(metadata, :last_known_org_sync_result),
+          failure_code: Map.get(metadata, :failure_code),
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
@@ -1073,7 +1101,18 @@ defmodule SymphonyElixir.Orchestrator do
           attempt: attempt,
           due_in_ms: max(0, due_at_ms - now_ms),
           identifier: Map.get(retry, :identifier),
-          error: Map.get(retry, :error)
+          error: Map.get(retry, :error),
+          execution_backend: Map.get(retry, :execution_backend),
+          workflow_id: Map.get(retry, :workflow_id),
+          workflow_run_id: Map.get(retry, :workflow_run_id),
+          project_id: Map.get(retry, :project_id),
+          workspace_path: Map.get(retry, :workspace_path),
+          artifact_dir: Map.get(retry, :artifact_dir),
+          job_name: Map.get(retry, :job_name),
+          last_execution_status: Map.get(retry, :last_execution_status),
+          last_successful_status_poll_at: Map.get(retry, :last_successful_status_poll_at),
+          last_known_org_sync_result: Map.get(retry, :last_known_org_sync_result),
+          failure_code: Map.get(retry, :failure_code)
         }
       end)
 
@@ -1132,6 +1171,17 @@ defmodule SymphonyElixir.Orchestrator do
         artifact_dir: artifact_dir_for_update(Map.get(running_entry, :artifact_dir), update),
         job_name: job_name_for_update(Map.get(running_entry, :job_name), update),
         last_execution_status: execution_status_for_update(Map.get(running_entry, :last_execution_status), update),
+        last_successful_status_poll_at:
+          last_successful_status_poll_at_for_update(
+            Map.get(running_entry, :last_successful_status_poll_at),
+            update
+          ),
+        last_known_org_sync_result:
+          last_known_org_sync_result_for_update(
+            Map.get(running_entry, :last_known_org_sync_result),
+            update
+          ),
+        failure_code: failure_code_for_update(Map.get(running_entry, :failure_code), update),
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
@@ -1199,6 +1249,29 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp execution_status_for_update(existing, _update), do: existing
 
+  defp last_successful_status_poll_at_for_update(
+         existing,
+         %{timestamp: %DateTime{} = timestamp} = update
+       ) do
+    if payload_method(update) == "temporal/status", do: timestamp, else: existing
+  end
+
+  defp last_successful_status_poll_at_for_update(existing, _update), do: existing
+
+  defp last_known_org_sync_result_for_update(
+         _existing,
+         %{last_known_org_sync_result: %{} = org_sync_result}
+       ),
+       do: org_sync_result
+
+  defp last_known_org_sync_result_for_update(existing, _update), do: existing
+
+  defp failure_code_for_update(_existing, %{failure_code: failure_code})
+       when is_binary(failure_code),
+       do: failure_code
+
+  defp failure_code_for_update(existing, _update), do: existing
+
   defp session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
     do: session_id
 
@@ -1228,6 +1301,89 @@ defmodule SymphonyElixir.Orchestrator do
       message: update[:payload] || update[:raw],
       timestamp: update[:timestamp]
     }
+  end
+
+  defp payload_method(%{payload: %{method: method}}) when is_binary(method), do: method
+  defp payload_method(%{payload: %{"method" => method}}) when is_binary(method), do: method
+  defp payload_method(_update), do: nil
+
+  defp merge_retry_health_metadata(metadata, running_entry)
+       when is_map(metadata) and is_map(running_entry) do
+    Enum.reduce(@retry_health_metadata_fields, metadata, fn key, acc ->
+      case Map.get(running_entry, key) do
+        nil -> acc
+        value -> Map.put(acc, key, value)
+      end
+    end)
+  end
+
+  defp merge_retry_health_metadata(metadata, _running_entry), do: metadata
+
+  defp maybe_put_failure_code(metadata, nil), do: metadata
+  defp maybe_put_failure_code(metadata, failure_code), do: Map.put(metadata, :failure_code, failure_code)
+
+  defp maybe_put_last_known_org_sync_result(metadata, nil), do: metadata
+
+  defp maybe_put_last_known_org_sync_result(metadata, org_sync_result),
+    do: Map.put(metadata, :last_known_org_sync_result, org_sync_result)
+
+  defp failure_code_from_reason(reason) do
+    reason
+    |> failure_message_from_reason()
+    |> failure_code_from_failure_message()
+  end
+
+  defp org_sync_result_from_reason(reason) do
+    reason
+    |> failure_message_from_reason()
+    |> org_sync_result_from_failure_message()
+  end
+
+  defp failure_message_from_reason({{%RuntimeError{message: message}, _stacktrace}, _})
+       when is_binary(message),
+       do: message
+
+  defp failure_message_from_reason({%RuntimeError{message: message}, _stacktrace})
+       when is_binary(message),
+       do: message
+
+  defp failure_message_from_reason(%RuntimeError{message: message}) when is_binary(message),
+    do: message
+
+  defp failure_message_from_reason(message) when is_binary(message), do: message
+  defp failure_message_from_reason(reason), do: inspect(reason)
+
+  defp failure_code_from_failure_message(message) when is_binary(message) do
+    [
+      {"Temporal/K3s status checks stalled", "temporal_status_timeout"},
+      {"Temporal/K3s failed to sync Org workpad", "org_workpad_sync_failed"},
+      {"Temporal/K3s failed to sync Org state=", "org_state_sync_failed"},
+      {"Temporal/K3s run ended without a valid target state", "invalid_run_result_target_state"},
+      {"Temporal/K3s workflow ended with status=failed", "temporal_workflow_failed"},
+      {"Temporal/K3s workflow ended with status=cancelled", "temporal_workflow_cancelled"},
+      {"Temporal/K3s run failed", "temporal_run_failed"},
+      {"stalled for ", "worker_stalled"}
+    ]
+    |> Enum.find_value(fn {pattern, failure_code} ->
+      if String.contains?(message, pattern), do: failure_code
+    end)
+  end
+
+  defp org_sync_result_from_failure_message(message) when is_binary(message) do
+    if String.contains?(message, "Temporal/K3s failed to sync Org workpad") do
+      %{step: "workpad", status: "error"}
+    else
+      case Regex.named_captures(
+             ~r/Temporal\/K3s failed to sync Org state=(?<target_state>[^ ]+) for /,
+             message
+           ) do
+        %{"target_state" => target_state} ->
+          %{step: "state", status: "error", target_state: target_state}
+
+        _ ->
+          nil
+      end
+    end
   end
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
