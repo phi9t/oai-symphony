@@ -258,6 +258,8 @@ Notes:
   that env var before starting the unattended queue.
 - The default Temporal helper command is now `./temporal/bin/symphony`, which works correctly from
   the repository root.
+- The Temporal worker snapshots remote `.symphony` artifacts into `outputs/<run-id>/` and validates
+  `run-result.json` before it cleans up the finished K3s job.
 - The phase-1 remote golden path is governed by
   [`../docs/operations/phase-1-remote-validation-matrix.md`](../docs/operations/phase-1-remote-validation-matrix.md).
   Treat that matrix as the source of truth for gate classes, contract authority, owners, and pass
@@ -313,6 +315,8 @@ Notes:
 - The remote backend requires a Temporal helper command plus `repository.origin_url`.
 - `temporal.address` and `temporal.namespace` are forwarded to helper `run`, `status`, `cancel`,
   and `describe` requests, so remote lifecycle operations stay on the same Temporal cluster.
+- Helper JSON responses now include readiness metadata for those lifecycle operations, and helper
+  failures return a stable JSON error envelope with a boundary-scoped error code.
 - When Symphony retries a remote attempt, it generates a fresh `workflowId`, `projectId`, and K3s
   job name instead of reusing the previous durable identifiers.
 - The shipped remote workflow does not rely on `org_task`; Org updates are applied by Symphony after the job completes.
