@@ -1,0 +1,8 @@
+{
+  "workflowId": "issue/alpha",
+  "runId": "run-00123456",
+  "temporal": {
+    "address": "temporal.example:7233",
+    "namespace": "customer-a"
+  }
+}

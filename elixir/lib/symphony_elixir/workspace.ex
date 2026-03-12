@@ -55,7 +55,7 @@ defmodule SymphonyElixir.Workspace do
       true ->
         case validate_workspace_path(workspace) do
           :ok ->
-            maybe_run_before_remove_hook(workspace)
+            run_before_remove_hook(workspace, Path.basename(workspace))
             File.rm_rf(workspace)
 
           {:error, reason} ->
@@ -112,6 +112,27 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @spec run_before_remove_hook(Path.t(), map() | String.t() | nil) :: :ok
+  def run_before_remove_hook(workspace, issue_or_identifier \\ nil) when is_binary(workspace) do
+    issue_context = issue_context(issue_or_identifier)
+    hooks = Config.settings!().hooks
+
+    case File.dir?(workspace) do
+      true ->
+        case hooks.before_remove do
+          nil ->
+            :ok
+
+          command ->
+            run_hook(command, workspace, issue_context, "before_remove")
+            |> ignore_hook_failure()
+        end
+
+      false ->
+        :ok
+    end
+  end
+
   defp workspace_path_for_issue(safe_id) when is_binary(safe_id) do
     Config.settings!().workspace.root
     |> Path.join(safe_id)
@@ -139,30 +160,6 @@ defmodule SymphonyElixir.Workspace do
 
           command ->
             run_hook(command, workspace, issue_context, "after_create")
-        end
-
-      false ->
-        :ok
-    end
-  end
-
-  defp maybe_run_before_remove_hook(workspace) do
-    hooks = Config.settings!().hooks
-
-    case File.dir?(workspace) do
-      true ->
-        case hooks.before_remove do
-          nil ->
-            :ok
-
-          command ->
-            run_hook(
-              command,
-              workspace,
-              %{issue_id: nil, issue_identifier: Path.basename(workspace)},
-              "before_remove"
-            )
-            |> ignore_hook_failure()
         end
 
       false ->

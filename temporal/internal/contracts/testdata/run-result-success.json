@@ -1,0 +1,11 @@
+{
+  "status": "succeeded",
+  "targetState": "Human Review",
+  "summary": "Remote run completed successfully.",
+  "validation": [
+    "go test ./...",
+    "shellcheck temporal/bin/*"
+  ],
+  "blockedReason": null,
+  "needsContinuation": false
+}

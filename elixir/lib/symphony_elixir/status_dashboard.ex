@@ -7,7 +7,8 @@ defmodule SymphonyElixir.StatusDashboard do
   require Logger
 
   alias SymphonyElixir.{Config, HttpServer}
-  alias SymphonyElixir.StatusDashboard.Snapshot
+  alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.StatusDashboard.Projection
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @minimum_idle_rerender_ms 1_000
@@ -303,7 +304,7 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp snapshot_with_samples(token_samples, now_ms) do
-    case Snapshot.fetch() do
+    case snapshot_payload() do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         total_tokens = Map.get(codex_totals, :total_tokens, 0)
 
@@ -313,6 +314,7 @@ defmodule SymphonyElixir.StatusDashboard do
              running: running,
              retrying: retrying,
              codex_totals: codex_totals,
+             runtime: Map.get(snapshot, :runtime),
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }},
@@ -331,6 +333,7 @@ defmodule SymphonyElixir.StatusDashboard do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
+        runtime_lines = format_runtime_lines(Map.get(snapshot, :runtime))
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
@@ -360,6 +363,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+           runtime_lines,
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -439,6 +443,45 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_project_refresh_line(_) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("n/a", @ansi_gray)
+  end
+
+  defp format_runtime_lines(%{execution_backend: backend, ready: true})
+       when is_binary(backend) do
+    [
+      colorize("│ Execution: ", @ansi_bold) <>
+        colorize("#{backend} ready", @ansi_green)
+    ]
+  end
+
+  defp format_runtime_lines(%{execution_backend: backend, blockers: blockers})
+       when is_binary(backend) and is_list(blockers) and blockers != [] do
+    extra_blockers = max(length(blockers) - 3, 0)
+
+    [
+      colorize("│ Execution: ", @ansi_bold) <>
+        colorize("#{backend} blocked", @ansi_red)
+      | Enum.take(blockers, 3)
+        |> Enum.map(&format_runtime_blocker_line/1)
+        |> maybe_append_extra_blockers(extra_blockers)
+    ]
+  end
+
+  defp format_runtime_lines(_runtime_status), do: []
+
+  defp format_runtime_blocker_line(blocker) do
+    "│  " <>
+      colorize("blocker=", @ansi_dim) <>
+      colorize(truncate(runtime_blocker_message(blocker), 96), @ansi_red)
+  end
+
+  defp maybe_append_extra_blockers(lines, 0), do: lines
+
+  defp maybe_append_extra_blockers(lines, extra_blockers) do
+    lines ++ ["│  " <> colorize("+#{extra_blockers} more blockers", @ansi_dim)]
+  end
+
+  defp runtime_blocker_message(blocker) do
+    map_value(blocker, ["message", :message]) || inspect(blocker, limit: 5)
   end
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
@@ -560,6 +603,8 @@ defmodule SymphonyElixir.StatusDashboard do
           String.t() | nil
   def dashboard_url_for_test(host, configured_port, bound_port),
     do: dashboard_url(host, configured_port, bound_port)
+
+  defp snapshot_payload, do: Projection.snapshot_payload(Orchestrator)
 
   defp format_running_rows(running, running_event_width) do
     if running == [] do
@@ -817,16 +862,7 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp compact_session_id(nil), do: "n/a"
-  defp compact_session_id(session_id) when not is_binary(session_id), do: "n/a"
-
-  defp compact_session_id(session_id) do
-    if String.length(session_id) > 10 do
-      String.slice(session_id, 0, 4) <> "..." <> String.slice(session_id, -6, 6)
-    else
-      session_id
-    end
-  end
+  defp compact_session_id(session_id), do: Projection.compact_session_id(session_id)
 
   defp group_thousands(value) when is_binary(value) do
     sign = if String.starts_with?(value, "-"), do: "-", else: ""

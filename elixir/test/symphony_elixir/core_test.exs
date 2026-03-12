@@ -175,11 +175,44 @@ defmodule SymphonyElixir.CoreTest do
 
     assert Config.execution_kind() == "temporal_k3s"
     assert Config.temporal_helper_command() == "./temporal/bin/symphony"
+    assert Config.temporal_workflow_mode() == "phased"
     assert Config.repository_origin_url() == "https://example.com/repo.git"
     assert Config.repository_default_branch() == "trunk"
     assert Config.k3s_project_root() == "/tmp/symphony-projects"
     assert Config.k3s_shared_cache_root() == "/tmp/symphony-cache"
     assert :ok = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/bin/sh",
+      execution_kind: "temporal_k3s",
+      temporal_helper_command: "./temporal/bin/symphony",
+      temporal_workflow_mode: "vanilla",
+      repository_origin_url: "https://example.com/repo.git"
+    )
+
+    assert Config.temporal_workflow_mode() == "vanilla"
+    assert :ok = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "orgmode",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_file: "/tmp/tasks.org",
+      tracker_root_id: "ROOT-1",
+      tracker_emacsclient_command: "/bin/sh",
+      execution_kind: "temporal_k3s",
+      temporal_helper_command: "./temporal/bin/symphony",
+      temporal_workflow_mode: "not-a-mode",
+      repository_origin_url: "https://example.com/repo.git"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "workflow_mode"
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -206,6 +239,7 @@ defmodule SymphonyElixir.CoreTest do
     temporal = Map.get(config, "temporal", %{})
     assert is_map(temporal)
     assert is_binary(Map.get(temporal, "helper_command"))
+    assert Map.get(temporal, "workflow_mode") == "phased"
 
     repository = Map.get(config, "repository", %{})
     assert is_map(repository)
@@ -1805,4 +1839,12 @@ defmodule SymphonyElixir.CoreTest do
       File.rm_rf(test_root)
     end
   end
+end
+
+defmodule SymphonyElixir.CoreRecoveryScenarioHarnessTest do
+  use SymphonyElixir.TestSupport
+
+  import SymphonyElixir.TestSupport.RecoveryScenarioHarness
+
+  define_scenarios(SymphonyElixir.TestSupport.RecoveryScenarioHarness.LocalAdapter)
 end

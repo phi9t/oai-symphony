@@ -5,9 +5,10 @@ defmodule SymphonyElixirWeb.Observability.Projection do
 
   alias SymphonyElixir.Execution
   alias SymphonyElixir.Observability.CodexMessage
-  alias SymphonyElixir.StatusDashboard.Snapshot
 
-  @spec state_payload(Snapshot.result(), DateTime.t()) :: map()
+  @type snapshot_result :: {:ok, map()} | :timeout | :unavailable | :error
+
+  @spec state_payload(snapshot_result(), DateTime.t()) :: map()
   def state_payload(snapshot_result, generated_at \\ DateTime.utc_now())
 
   def state_payload({:ok, snapshot}, generated_at) do
@@ -39,9 +40,10 @@ defmodule SymphonyElixirWeb.Observability.Projection do
       codex_totals: snapshot.codex_totals,
       rate_limits: snapshot.rate_limits
     }
+    |> put_optional_field(:runtime, Map.get(snapshot, :runtime))
   end
 
-  @spec issue_payload(String.t(), Snapshot.result()) :: {:ok, map()} | {:error, :issue_not_found}
+  @spec issue_payload(String.t(), snapshot_result()) :: {:ok, map()} | {:error, :issue_not_found}
   def issue_payload(issue_identifier, snapshot_result)
 
   def issue_payload(issue_identifier, {:ok, snapshot}) when is_binary(issue_identifier) do
@@ -131,6 +133,7 @@ defmodule SymphonyElixirWeb.Observability.Projection do
       due_at: due_at_iso8601(reference_time, entry.due_in_ms),
       error: entry.error
     }
+    |> put_optional_runtime_metadata(entry)
   end
 
   defp running_issue_payload(running) do
@@ -157,6 +160,7 @@ defmodule SymphonyElixirWeb.Observability.Projection do
       due_at: due_at_iso8601(reference_time, retry.due_in_ms),
       error: retry.error
     }
+    |> put_optional_runtime_metadata(retry)
   end
 
   defp recent_events_payload(running) do
@@ -173,20 +177,34 @@ defmodule SymphonyElixirWeb.Observability.Projection do
   defp summarize_message(nil), do: nil
   defp summarize_message(message), do: CodexMessage.humanize(message)
 
-  defp put_optional_running_metadata(payload, entry) do
+  defp put_optional_running_metadata(payload, entry), do: put_optional_runtime_metadata(payload, entry)
+
+  defp put_optional_runtime_metadata(payload, entry) do
     payload
     |> put_optional_field(:execution_backend, Map.get(entry, :execution_backend))
     |> put_optional_field(:workflow_id, Map.get(entry, :workflow_id))
     |> put_optional_field(:workflow_run_id, Map.get(entry, :workflow_run_id))
+    |> put_optional_field(:workflow_mode, Map.get(entry, :workflow_mode))
+    |> put_optional_field(:current_phase, Map.get(entry, :current_phase))
+    |> put_optional_field(:phases, Map.get(entry, :phases))
     |> put_optional_field(:project_id, Map.get(entry, :project_id))
     |> put_optional_field(:workspace_path, Map.get(entry, :workspace_path))
     |> put_optional_field(:artifact_dir, Map.get(entry, :artifact_dir))
     |> put_optional_field(:job_name, Map.get(entry, :job_name))
     |> put_optional_field(:last_execution_status, Map.get(entry, :last_execution_status))
+    |> put_optional_field(:last_successful_status_poll, iso8601(Map.get(entry, :last_successful_status_poll_at)))
+    |> put_optional_field(
+      :last_known_org_sync_result,
+      normalized_org_sync_result(Map.get(entry, :last_known_org_sync_result))
+    )
+    |> put_optional_field(:failure_code, Map.get(entry, :failure_code))
   end
 
   defp put_optional_field(payload, _key, nil), do: payload
   defp put_optional_field(payload, key, value), do: Map.put(payload, key, value)
+
+  defp normalized_org_sync_result(%{} = org_sync_result), do: org_sync_result
+  defp normalized_org_sync_result(_org_sync_result), do: nil
 
   defp due_at_iso8601(%DateTime{} = reference_time, due_in_ms) when is_integer(due_in_ms) do
     reference_time

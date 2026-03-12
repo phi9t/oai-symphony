@@ -13,4 +13,10 @@ defmodule SymphonyElixirWeb.Presenter do
 
   @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
   defdelegate refresh_payload(orchestrator), to: Observability
+
+  @spec retry_payload(GenServer.name(), String.t()) :: {:ok, map()} | {:error, :invalid_issue_identifier | :issue_not_found | :unavailable}
+  defdelegate retry_payload(orchestrator, issue_identifier), to: Observability
+
+  @spec cleanup_payload(GenServer.name(), String.t()) :: {:ok, map()} | {:error, :invalid_issue_identifier | :unavailable}
+  defdelegate cleanup_payload(orchestrator, issue_identifier), to: Observability
 end

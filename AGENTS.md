@@ -7,7 +7,7 @@ This repository has two layers:
 - Root files define the project contract and shared docs: `README.md`, `SPEC.md`, and `.github/`.
 - `elixir/` contains the active reference implementation. Core runtime code lives in `elixir/lib/symphony_elixir/`, web and dashboard code in `elixir/lib/symphony_elixir_web/`, config in `elixir/config/`, static assets in `elixir/priv/static/`, and tests in `elixir/test/`.
 
-Keep implementation changes aligned with [`SPEC.md`](/mnt/data_infra/workspace/symphony/SPEC.md). If behavior or configuration changes, update the matching docs in `README.md`, `elixir/README.md`, and `elixir/WORKFLOW.md` in the same PR.
+Keep implementation changes aligned with [`SPEC.md`](/mnt/data_infra/workspace/symphony/SPEC.md). If behavior or configuration changes, update the matching docs in `README.md`, `elixir/README.md`, and `elixir/WORKFLOW.md` in the same PR. If validation posture, smoke cadence, evidence handling, or triage guidance changes, update `docs/operations/validation-triage.md` and `docs/operations/phase-1-remote-validation-matrix.md` in the same PR.
 
 ## Build, Test, and Development Commands
 
@@ -31,6 +31,12 @@ Public functions in `elixir/lib/` must have adjacent `@spec` declarations unless
 Tests use ExUnit and live under `elixir/test/` with filenames ending in `_test.exs`. Snapshot fixtures for dashboard output live in `elixir/test/fixtures/status_dashboard_snapshots/`.
 
 The project sets a 100% coverage summary threshold in `elixir/mix.exs`, so add or update tests with every behavioral change. Prefer targeted runs while iterating, then finish with `make -C elixir all`.
+
+## RFC Proposals
+
+Use the RFC process for major architecture, runtime, workflow, or process changes. Create one proposal per file under `docs/rfcs/`, following [`docs/rfcs/0000-template.md`](/mnt/data_infra/workspace/symphony/docs/rfcs/0000-template.md) and the workflow in [`docs/rfcs/README.md`](/mnt/data_infra/workspace/symphony/docs/rfcs/README.md).
+
+Accepted RFCs should be converted into Org tasks only after review votes are recorded. When task boundaries are clear, create tasks directly; otherwise keep the RFC in review and draft tasks later.
 
 ## Commit & Pull Request Guidelines
 
