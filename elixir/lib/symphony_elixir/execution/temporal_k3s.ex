@@ -135,10 +135,9 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp fetch_workpad(%Issue{id: issue_id}) when is_binary(issue_id) do
-    if Config.tracker_kind() == "orgmode" do
-      fetch_org_workpad(issue_id)
-    else
-      @default_workpad
+    case Config.tracker_kind() do
+      "orgmode" -> fetch_org_workpad(issue_id)
+      _other -> @default_workpad
     end
   end
 
@@ -257,11 +256,13 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
         Logger.warning("Temporal/K3s status check failed for #{issue_context(issue)} elapsed_ms=#{elapsed_ms} timeout_ms=#{timeout_ms}: #{inspect(reason)}")
 
-        if status_failure_timed_out?(elapsed_ms, timeout_ms) do
-          raise RuntimeError,
-                "Temporal/K3s status checks stalled for #{issue_context(issue)} after #{elapsed_ms}ms (timeout=#{timeout_ms}ms): #{inspect(reason)}"
-        else
-          do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms)
+        case status_failure_timed_out?(elapsed_ms, timeout_ms) do
+          true ->
+            raise RuntimeError,
+                  "Temporal/K3s status checks stalled for #{issue_context(issue)} after #{elapsed_ms}ms (timeout=#{timeout_ms}ms): #{inspect(reason)}"
+
+          false ->
+            do_await_remote_completion(issue, run_state, cli_opts, recipient, poll_ms)
         end
     end
   end
@@ -301,12 +302,14 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
     case {normalized_workflow_status(status), run_result} do
       {status_name, %{} = result} when status_name in ["succeeded", "failed", "cancelled"] ->
-        if allowed_target_state?(Map.get(result, "targetState")) or
-             Map.has_key?(result, "needsContinuation") do
-          :ok
-        else
-          raise RuntimeError,
-                "Temporal/K3s run ended without a valid target state for #{issue_context(issue)}"
+        case allowed_target_state?(Map.get(result, "targetState")) or
+               Map.has_key?(result, "needsContinuation") do
+          true ->
+            :ok
+
+          false ->
+            raise RuntimeError,
+                  "Temporal/K3s run ended without a valid target state for #{issue_context(issue)}"
         end
 
       {"succeeded", _} ->
@@ -320,15 +323,19 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp maybe_replace_org_workpad(%Issue{id: issue_id} = issue, content)
        when is_binary(issue_id) and is_binary(content) do
-    if Config.tracker_kind() == "orgmode" do
-      case Adapter.replace_workpad(issue_id, content) do
-        {:ok, _content} ->
-          :ok
+    case Config.tracker_kind() do
+      "orgmode" ->
+        case Adapter.replace_workpad(issue_id, content) do
+          {:ok, _content} ->
+            :ok
 
-        {:error, reason} ->
-          raise RuntimeError,
-                "Temporal/K3s failed to sync Org workpad for #{issue_context(issue)}: #{inspect(reason)}"
-      end
+          {:error, reason} ->
+            raise RuntimeError,
+                  "Temporal/K3s failed to sync Org workpad for #{issue_context(issue)}: #{inspect(reason)}"
+        end
+
+      _other ->
+        :ok
     end
 
     :ok
@@ -338,10 +345,14 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
 
   defp maybe_apply_run_result_state(%Issue{id: issue_id} = issue, %{} = result)
        when is_binary(issue_id) do
-    if Config.tracker_kind() == "orgmode" do
-      result
-      |> target_state_from_run_result()
-      |> maybe_sync_org_state!(issue, issue_id)
+    case Config.tracker_kind() do
+      "orgmode" ->
+        result
+        |> target_state_from_run_result()
+        |> maybe_sync_org_state!(issue, issue_id)
+
+      _other ->
+        :ok
     end
 
     :ok
@@ -357,7 +368,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
   end
 
   defp maybe_sync_org_state!(target_state, issue, issue_id) do
-    if is_binary(target_state) and allowed_target_state?(target_state) do
+    with true <- is_binary(target_state),
+         true <- allowed_target_state?(target_state) do
       case Tracker.update_issue_state(issue_id, target_state) do
         :ok ->
           :ok
@@ -367,7 +379,8 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
                 "Temporal/K3s failed to sync Org state=#{target_state} for #{issue_context(issue)}: #{inspect(reason)}"
       end
     else
-      :ok
+      _other ->
+        :ok
     end
   end
 
@@ -483,7 +496,10 @@ defmodule SymphonyElixir.Execution.TemporalK3s do
           |> Enum.filter(&project_root_entry_for_issue?(&1, base_project_id))
           |> Enum.map(&Path.join(project_root, &1))
 
-        if matches == [], do: [fallback_root], else: matches
+        case matches do
+          [] -> [fallback_root]
+          _entries -> matches
+        end
 
       {:error, _reason} ->
         [fallback_root]

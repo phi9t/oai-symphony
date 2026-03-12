@@ -8,6 +8,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
   alias SymphonyElixir.{Config, HttpServer}
   alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.StatusDashboard.Projection
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @minimum_idle_rerender_ms 1_000
@@ -561,31 +562,7 @@ defmodule SymphonyElixir.StatusDashboard do
   def dashboard_url_for_test(host, configured_port, bound_port),
     do: dashboard_url(host, configured_port, bound_port)
 
-  defp snapshot_payload do
-    if Process.whereis(Orchestrator) do
-      case Orchestrator.snapshot() do
-        %{
-          running: running,
-          retrying: retrying,
-          codex_totals: codex_totals
-        } = snapshot
-        when is_list(running) and is_list(retrying) ->
-          {:ok,
-           %{
-             running: running,
-             retrying: retrying,
-             codex_totals: codex_totals,
-             rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
-           }}
-
-        _ ->
-          :error
-      end
-    else
-      :error
-    end
-  end
+  defp snapshot_payload, do: Projection.snapshot_payload(Orchestrator)
 
   defp format_running_rows(running, running_event_width) do
     if running == [] do
@@ -843,16 +820,7 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp compact_session_id(nil), do: "n/a"
-  defp compact_session_id(session_id) when not is_binary(session_id), do: "n/a"
-
-  defp compact_session_id(session_id) do
-    if String.length(session_id) > 10 do
-      String.slice(session_id, 0, 4) <> "..." <> String.slice(session_id, -6, 6)
-    else
-      session_id
-    end
-  end
+  defp compact_session_id(session_id), do: Projection.compact_session_id(session_id)
 
   defp group_thousands(value) when is_binary(value) do
     sign = if String.starts_with?(value, "-"), do: "-", else: ""

@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias NimbleOptions
-  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Config.{Access, Loader, Schema}
   alias SymphonyElixir.Workflow
 
   @default_active_states ["Todo", "In Progress"]
@@ -290,30 +290,12 @@ defmodule SymphonyElixir.Config do
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
-    case current_workflow() do
-      {:ok, %{config: config}} when is_map(config) ->
-        config
-        |> normalize_keys()
-        |> schema_settings_payload()
-        |> Schema.parse()
-
-      {:error, reason} ->
-        {:error, reason}
-
-      _ ->
-        Schema.parse(%{})
-    end
+    Loader.settings(current_workflow())
   end
 
   @spec settings!() :: Schema.t()
   def settings! do
-    case settings() do
-      {:ok, settings} ->
-        settings
-
-      {:error, reason} ->
-        raise ArgumentError, message: format_config_error(reason)
-    end
+    Loader.settings!(current_workflow())
   end
 
   @spec tracker_kind() :: tracker_kind()
@@ -580,13 +562,7 @@ defmodule SymphonyElixir.Config do
 
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
-    case current_workflow() do
-      {:ok, %{prompt_template: prompt}} ->
-        if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
-
-      _ ->
-        @default_prompt_template
-    end
+    Loader.workflow_prompt(current_workflow(), @default_prompt_template)
   end
 
   @spec observability_enabled?() :: boolean()
@@ -631,7 +607,7 @@ defmodule SymphonyElixir.Config do
          :ok <- require_org_root_id(),
          :ok <- require_org_emacsclient_command(),
          :ok <- require_temporal_helper_command(),
-          :ok <- require_repository_origin_url(),
+         :ok <- require_repository_origin_url(),
          :ok <- require_valid_codex_policy_settings(),
          :ok <- require_valid_codex_runtime_settings() do
       require_codex_command()
@@ -1192,9 +1168,7 @@ defmodule SymphonyElixir.Config do
   end
 
   defp normalize_issue_state(state_name) when is_binary(state_name) do
-    state_name
-    |> String.trim()
-    |> String.downcase()
+    Access.normalize_issue_state(state_name)
   end
 
   defp normalize_tracker_kind(kind) when is_binary(kind) do
@@ -1268,191 +1242,11 @@ defmodule SymphonyElixir.Config do
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
 
-  defp resolve_path_value(:missing, default), do: default
-  defp resolve_path_value(nil, default), do: default
+  defp resolve_path_value(value, default), do: Access.resolve_path_value(value, default)
 
-  defp resolve_path_value(value, default) when is_binary(value) do
-    case normalize_path_token(value) do
-      :missing ->
-        default
+  defp resolve_env_value(value, fallback), do: Access.resolve_env_value(value, fallback)
 
-      path ->
-        path
-        |> String.trim()
-        |> preserve_command_name()
-        |> then(fn
-          "" -> default
-          resolved -> resolved
-        end)
-    end
-  end
+  defp normalize_secret_value(value), do: Access.normalize_secret_value(value)
 
-  defp resolve_path_value(_value, default), do: default
-
-  defp preserve_command_name(path) do
-    cond do
-      uri_path?(path) ->
-        path
-
-      String.contains?(path, "/") or String.contains?(path, "\\") ->
-        Path.expand(path)
-
-      true ->
-        path
-    end
-  end
-
-  defp uri_path?(path) do
-    String.match?(to_string(path), ~r/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//)
-  end
-
-  defp resolve_env_value(:missing, fallback), do: fallback
-  defp resolve_env_value(nil, fallback), do: fallback
-
-  defp resolve_env_value(value, fallback) when is_binary(value) do
-    trimmed = String.trim(value)
-
-    case env_reference_name(trimmed) do
-      {:ok, env_name} ->
-        env_name
-        |> System.get_env()
-        |> then(fn
-          nil -> fallback
-          "" -> nil
-          env_value -> env_value
-        end)
-
-      :error ->
-        trimmed
-    end
-  end
-
-  defp resolve_env_value(_value, fallback), do: fallback
-
-  defp normalize_path_token(value) when is_binary(value) do
-    trimmed = String.trim(value)
-
-    case env_reference_name(trimmed) do
-      {:ok, env_name} -> resolve_env_token(env_name)
-      :error -> trimmed
-    end
-  end
-
-  defp env_reference_name("$" <> env_name) do
-    if String.match?(env_name, ~r/^[A-Za-z_][A-Za-z0-9_]*$/) do
-      {:ok, env_name}
-    else
-      :error
-    end
-  end
-
-  defp env_reference_name(_value), do: :error
-
-  defp resolve_env_token(value) do
-    case System.get_env(value) do
-      nil -> :missing
-      env_value -> env_value
-    end
-  end
-
-  defp normalize_secret_value(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> nil
-      trimmed -> trimmed
-    end
-  end
-
-  defp normalize_secret_value(_value), do: nil
-
-  defp org_emacsclient_available? do
-    case OptionParser.split(org_emacsclient_command()) do
-      [command | _args] ->
-        org_emacsclient_command_path?(command)
-
-      _ ->
-        false
-    end
-  rescue
-    _error ->
-      false
-  end
-
-  defp org_emacsclient_command_path?(command) when is_binary(command) do
-    cond do
-      command == "" ->
-        false
-
-      String.contains?(command, "/") ->
-        File.exists?(command)
-
-      true ->
-        not is_nil(System.find_executable(command))
-    end
-  end
-
-  defp format_config_error(reason) do
-    case reason do
-      {:invalid_workflow_config, message} ->
-        "Invalid WORKFLOW.md config: #{message}"
-
-      {:missing_workflow_file, path, raw_reason} ->
-        "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
-
-      {:workflow_parse_error, raw_reason} ->
-        "Failed to parse WORKFLOW.md: #{inspect(raw_reason)}"
-
-      :workflow_front_matter_not_a_map ->
-        "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
-
-      other ->
-        "Invalid WORKFLOW.md config: #{inspect(other)}"
-    end
-  end
-
-  defp schema_settings_payload(config) when is_map(config) do
-    %{
-      "tracker" => schema_tracker_payload(section_map(config, "tracker")),
-      "polling" => section_map(config, "polling"),
-      "workspace" => section_map(config, "workspace"),
-      "agent" => section_map(config, "agent"),
-      "codex" => schema_codex_payload(section_map(config, "codex")),
-      "hooks" => section_map(config, "hooks"),
-      "observability" => section_map(config, "observability"),
-      "server" => section_map(config, "server")
-    }
-  end
-
-  defp schema_tracker_payload(section) when is_map(section) do
-    section
-    |> Map.update("kind", nil, &normalize_tracker_kind/1)
-    |> Map.update("active_states", nil, &schema_csv_or_list_value/1)
-    |> Map.update("terminal_states", nil, &schema_csv_or_list_value/1)
-  end
-
-  defp schema_tracker_payload(_section), do: %{}
-
-  defp schema_codex_payload(section) when is_map(section) do
-    case Map.get(section, "turn_sandbox_policy") do
-      nil ->
-        section
-
-      policy when is_map(policy) ->
-        section
-
-      _other ->
-        Map.delete(section, "turn_sandbox_policy")
-    end
-  end
-
-  defp schema_codex_payload(_section), do: %{}
-
-  defp schema_csv_or_list_value(nil), do: nil
-
-  defp schema_csv_or_list_value(values) when is_list(values) do
-    values
-    |> Enum.map(&scalar_string_value/1)
-    |> Enum.reject(&(&1 in [:omit, ""]))
-  end
-
-  defp schema_csv_or_list_value(value), do: value
+  defp org_emacsclient_available?, do: Access.org_emacsclient_available?(org_emacsclient_command())
 end

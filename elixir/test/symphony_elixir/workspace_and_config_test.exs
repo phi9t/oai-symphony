@@ -913,27 +913,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              limits: {"state names must not be blank", []},
              limits: {"limits must be positive integers", []}
            ]
+
+    valid_changeset =
+      {%{}, %{limits: :map}}
+      |> Changeset.cast(%{limits: %{"todo" => 1}}, [:limits])
+      |> Schema.validate_state_limits(:limits)
+
+    assert valid_changeset.errors == []
   end
 
   test "schema parse normalizes policy keys and env-backed fallbacks" do
     missing_workspace_env = "SYMP_MISSING_WORKSPACE_#{System.unique_integer([:positive])}"
+    present_workspace_env = "SYMP_PRESENT_WORKSPACE_#{System.unique_integer([:positive])}"
     empty_secret_env = "SYMP_EMPTY_SECRET_#{System.unique_integer([:positive])}"
     missing_secret_env = "SYMP_MISSING_SECRET_#{System.unique_integer([:positive])}"
+    present_secret_env = "SYMP_PRESENT_SECRET_#{System.unique_integer([:positive])}"
 
     previous_missing_workspace_env = System.get_env(missing_workspace_env)
+    previous_present_workspace_env = System.get_env(present_workspace_env)
     previous_empty_secret_env = System.get_env(empty_secret_env)
     previous_missing_secret_env = System.get_env(missing_secret_env)
+    previous_present_secret_env = System.get_env(present_secret_env)
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
 
     System.delete_env(missing_workspace_env)
+    System.put_env(present_workspace_env, "/tmp/schema-present-workspace")
     System.put_env(empty_secret_env, "")
     System.delete_env(missing_secret_env)
+    System.put_env(present_secret_env, "provided-token")
     System.put_env("LINEAR_API_KEY", "fallback-linear-token")
 
     on_exit(fn ->
       restore_env(missing_workspace_env, previous_missing_workspace_env)
+      restore_env(present_workspace_env, previous_present_workspace_env)
       restore_env(empty_secret_env, previous_empty_secret_env)
       restore_env(missing_secret_env, previous_missing_secret_env)
+      restore_env(present_secret_env, previous_present_secret_env)
       restore_env("LINEAR_API_KEY", previous_linear_api_key)
     end)
 
@@ -959,6 +974,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert settings.tracker.api_key == "fallback-linear-token"
     assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{api_key: "$#{present_secret_env}"},
+               workspace: %{root: "$#{present_workspace_env}"}
+             })
+
+    assert settings.tracker.api_key == "provided-token"
+    assert settings.workspace.root == Path.expand("/tmp/schema-present-workspace")
   end
 
   test "schema resolves sandbox policies from explicit and default workspaces" do
