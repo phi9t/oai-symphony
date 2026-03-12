@@ -110,6 +110,7 @@ defmodule SymphonyElixir.TestSupport do
           temporal_namespace: "default",
           temporal_task_queue: "symphony",
           temporal_status_poll_ms: 5_000,
+          temporal_workflow_mode: :omit,
           k3s_namespace: "symphony",
           k3s_image: "symphony/agent:latest",
           k3s_project_root: Path.join(System.tmp_dir!(), "symphony_projects"),
@@ -166,6 +167,7 @@ defmodule SymphonyElixir.TestSupport do
     temporal_namespace = Keyword.get(config, :temporal_namespace)
     temporal_task_queue = Keyword.get(config, :temporal_task_queue)
     temporal_status_poll_ms = Keyword.get(config, :temporal_status_poll_ms)
+    temporal_workflow_mode = Keyword.get(config, :temporal_workflow_mode)
     k3s_namespace = Keyword.get(config, :k3s_namespace)
     k3s_image = Keyword.get(config, :k3s_image)
     k3s_project_root = Keyword.get(config, :k3s_project_root)
@@ -226,6 +228,7 @@ defmodule SymphonyElixir.TestSupport do
         "  namespace: #{yaml_value(temporal_namespace)}",
         "  task_queue: #{yaml_value(temporal_task_queue)}",
         "  status_poll_ms: #{yaml_value(temporal_status_poll_ms)}",
+        temporal_workflow_mode_yaml(temporal_workflow_mode),
         "k3s:",
         "  namespace: #{yaml_value(k3s_namespace)}",
         "  image: #{yaml_value(k3s_image)}",
@@ -286,6 +289,9 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp temporal_workflow_mode_yaml(:omit), do: nil
+  defp temporal_workflow_mode_yaml(value), do: "  workflow_mode: #{yaml_value(value)}"
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

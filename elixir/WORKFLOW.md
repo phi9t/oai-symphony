@@ -44,6 +44,7 @@ temporal:
   namespace: "$TEMPORAL_NAMESPACE"
   task_queue: "symphony"
   status_poll_ms: 5000
+  workflow_mode: "phased"
 k3s:
   namespace: "symphony"
   image: "symphony/agent:latest"
@@ -70,7 +71,9 @@ codex:
 ---
 
 The configured `temporal.address` and `temporal.namespace` apply to helper `run`, `status`,
-`cancel`, and `describe` requests.
+`cancel`, and `describe` requests. `temporal.workflow_mode` defaults to `phased`; set it to
+`vanilla` when you need the original single-job remote fallback while keeping the normalized
+runtime-state payloads.
 
 You are working on an Org task `{{ issue.identifier }}`.
 

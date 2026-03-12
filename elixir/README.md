@@ -197,6 +197,7 @@ execution:
   kind: temporal_k3s
 temporal:
   helper_command: "./temporal/bin/symphony"
+  workflow_mode: "phased"
 repository:
   origin_url: "https://github.com/your-org/your-repo.git"
 codex:
@@ -212,6 +213,8 @@ Notes:
 - If a value is missing, defaults are used.
 - `execution.kind: temporal_k3s` enables the new remote backend; `local` keeps the original host-local runner.
 - The remote backend requires a Temporal helper command plus `repository.origin_url`.
+- `temporal.workflow_mode` accepts `phased` or `vanilla`; `phased` is the default and `vanilla`
+  keeps the original single-job remote path available as a fallback.
 - `temporal.address` and `temporal.namespace` are forwarded to helper `run`, `status`, `cancel`,
   and `describe` requests, so remote lifecycle operations stay on the same Temporal cluster.
 - When Symphony retries a remote attempt, it generates a fresh `workflowId`, `projectId`, and K3s

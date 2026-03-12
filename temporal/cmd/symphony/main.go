@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,20 +15,23 @@ import (
 	"go.temporal.io/api/serviceerror"
 	workflowservice "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 
 	"symphony-temporal/internal/activities"
 	"symphony-temporal/internal/workflows"
 )
 
 type workflowInput struct {
-	WorkflowID string                    `json:"workflowId"`
-	RunID      string                    `json:"runId"`
-	Temporal   activities.TemporalConfig `json:"temporal"`
+	WorkflowID   string                    `json:"workflowId"`
+	RunID        string                    `json:"runId"`
+	WorkflowMode string                    `json:"workflowMode"`
+	Temporal     activities.TemporalConfig `json:"temporal"`
 }
 
 type temporalClient interface {
 	ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow interface{}, args ...interface{}) (client.WorkflowRun, error)
 	DescribeWorkflowExecution(ctx context.Context, workflowID string, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
+	QueryWorkflow(ctx context.Context, workflowID string, runID string, queryType string, args ...interface{}) (converter.EncodedValue, error)
 	CancelWorkflow(ctx context.Context, workflowID string, runID string) error
 	Close()
 }
@@ -109,28 +111,12 @@ func runCommand(args []string) error {
 	if err != nil {
 		var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
 		if errors.As(err, &alreadyStarted) {
-			return printJSON(*outputKind, map[string]any{
-				"workflowId":    input.WorkflowID,
-				"runId":         alreadyStarted.RunId,
-				"status":        "running",
-				"projectId":     input.ProjectID,
-				"workspacePath": input.Paths.WorkspacePath,
-				"artifactDir":   filepath.Join(input.Paths.OutputsPath, alreadyStarted.RunId),
-				"jobName":       activities.JobName(input.WorkflowID, alreadyStarted.RunId),
-			})
+			return printJSON(*outputKind, activities.BuildWorkflowState(input, alreadyStarted.RunId, "running"))
 		}
 		return fmt.Errorf("unable to start workflow: %w", err)
 	}
 
-	return printJSON(*outputKind, map[string]any{
-		"workflowId":    we.GetID(),
-		"runId":         we.GetRunID(),
-		"status":        "running",
-		"projectId":     input.ProjectID,
-		"workspacePath": input.Paths.WorkspacePath,
-		"artifactDir":   filepath.Join(input.Paths.OutputsPath, we.GetRunID()),
-		"jobName":       activities.JobName(we.GetID(), we.GetRunID()),
-	})
+	return printJSON(*outputKind, activities.BuildWorkflowState(input, we.GetRunID(), "running"))
 }
 
 func statusCommand(args []string) error {
@@ -173,11 +159,14 @@ func statusCommand(args []string) error {
 		runID = info.Execution.RunId
 	}
 
-	return printJSON(*outputKind, map[string]any{
-		"workflowId": input.WorkflowID,
-		"runId":      runID,
-		"status":     workflowStatus(info.Status),
-	})
+	status := workflowStatus(info.Status)
+	state := fallbackWorkflowState(input, runID, status)
+
+	if queriedState, err := queryWorkflowState(ctx, c, input, runID, status); err == nil {
+		state = queriedState
+	}
+
+	return printJSON(*outputKind, state)
 }
 
 func cancelCommand(args []string) error {
@@ -231,7 +220,7 @@ func readJSON(path string, target any) error {
 	return nil
 }
 
-func printJSON(outputKind string, payload map[string]any) error {
+func printJSON(outputKind string, payload any) error {
 	switch strings.ToLower(strings.TrimSpace(outputKind)) {
 	case "", "json":
 		data, err := json.Marshal(payload)
@@ -275,6 +264,33 @@ func workflowStatus(status enumspb.WorkflowExecutionStatus) string {
 		return "cancelled"
 	default:
 		return "running"
+	}
+}
+
+func queryWorkflowState(ctx context.Context, c temporalClient, input workflowInput, runID, status string) (activities.WorkflowState, error) {
+	queryValue, err := c.QueryWorkflow(ctx, input.WorkflowID, runID, "symphony_state")
+	if err != nil {
+		return activities.WorkflowState{}, err
+	}
+
+	var state activities.WorkflowState
+	if err := queryValue.Get(&state); err != nil {
+		return activities.WorkflowState{}, err
+	}
+
+	return activities.NormalizeWorkflowState(state, workflowStateInput(input, runID), status), nil
+}
+
+func fallbackWorkflowState(input workflowInput, runID, status string) activities.WorkflowState {
+	return activities.BuildWorkflowState(workflowStateInput(input, runID), runID, status)
+}
+
+func workflowStateInput(input workflowInput, runID string) activities.RunInput {
+	return activities.RunInput{
+		WorkflowID:   input.WorkflowID,
+		RunID:        runID,
+		WorkflowMode: input.WorkflowMode,
+		Temporal:     input.Temporal,
 	}
 }
 

@@ -58,6 +58,7 @@ defmodule SymphonyElixir.Config do
   @default_temporal_namespace "default"
   @default_temporal_task_queue "symphony"
   @default_temporal_status_poll_ms 5_000
+  @default_temporal_workflow_mode "phased"
   @default_k3s_namespace "symphony"
   @default_k3s_image "symphony/agent:latest"
   @default_k3s_project_root Path.join(System.tmp_dir!(), "symphony_projects")
@@ -137,6 +138,10 @@ defmodule SymphonyElixir.Config do
                                  status_poll_ms: [
                                    type: :pos_integer,
                                    default: @default_temporal_status_poll_ms
+                                 ],
+                                 workflow_mode: [
+                                   type: {:in, ["phased", "vanilla"]},
+                                   default: @default_temporal_workflow_mode
                                  ]
                                ]
                              ],
@@ -424,6 +429,11 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:temporal, :status_poll_ms])
   end
 
+  @spec temporal_workflow_mode() :: String.t()
+  def temporal_workflow_mode do
+    get_in(validated_workflow_options(), [:temporal, :workflow_mode])
+  end
+
   @spec k3s_namespace() :: String.t()
   def k3s_namespace do
     get_in(validated_workflow_options(), [:k3s, :namespace])
@@ -623,6 +633,7 @@ defmodule SymphonyElixir.Config do
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, _settings} <- settings(),
+         :ok <- require_validated_workflow_options(),
          :ok <- require_tracker_kind(),
          :ok <- require_execution_kind(),
          :ok <- require_linear_token(),
@@ -631,7 +642,7 @@ defmodule SymphonyElixir.Config do
          :ok <- require_org_root_id(),
          :ok <- require_org_emacsclient_command(),
          :ok <- require_temporal_helper_command(),
-          :ok <- require_repository_origin_url(),
+         :ok <- require_repository_origin_url(),
          :ok <- require_valid_codex_policy_settings(),
          :ok <- require_valid_codex_runtime_settings() do
       require_codex_command()
@@ -798,6 +809,16 @@ defmodule SymphonyElixir.Config do
     |> NimbleOptions.validate!(@workflow_options_schema)
   end
 
+  defp require_validated_workflow_options do
+    case NimbleOptions.validate(extract_workflow_options(workflow_config()), @workflow_options_schema) do
+      {:ok, _options} ->
+        :ok
+
+      {:error, error} ->
+        {:error, {:invalid_workflow_config, Exception.message(error)}}
+    end
+  end
+
   defp extract_workflow_options(config) do
     %{
       tracker: extract_tracker_options(section_map(config, "tracker")),
@@ -847,6 +868,10 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:namespace, scalar_string_value(Map.get(section, "namespace")))
     |> put_if_present(:task_queue, scalar_string_value(Map.get(section, "task_queue")))
     |> put_if_present(:status_poll_ms, positive_integer_value(Map.get(section, "status_poll_ms")))
+    |> put_if_present(
+      :workflow_mode,
+      normalize_temporal_workflow_mode(scalar_string_value(Map.get(section, "workflow_mode")))
+    )
   end
 
   defp extract_k3s_options(section) do
@@ -1219,6 +1244,15 @@ defmodule SymphonyElixir.Config do
   end
 
   defp normalize_execution_kind(_kind), do: :omit
+
+  defp normalize_temporal_workflow_mode(mode) when is_binary(mode) do
+    case mode |> String.trim() |> String.downcase() do
+      "" -> :omit
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_temporal_workflow_mode(_mode), do: :omit
 
   defp workflow_config do
     case current_workflow() do
