@@ -1,0 +1,13 @@
+{
+  "workflowId": "issue/alpha",
+  "runId": "run-00123456",
+  "status": "running",
+  "projectId": "rev-19",
+  "workspacePath": "/tmp/remote/rev-19/workspace",
+  "artifactDir": "/tmp/remote/rev-19/outputs/run-00123456",
+  "jobName": "symphony-job-rev-19-issue-alpha-run-0012",
+  "readiness": {
+    "state": "pending",
+    "reason": "workflow-active"
+  }
+}

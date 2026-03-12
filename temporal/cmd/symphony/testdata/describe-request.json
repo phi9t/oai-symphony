@@ -1,0 +1,7 @@
+{
+  "workflowId": "issue/alpha",
+  "temporal": {
+    "address": "temporal.example:7233",
+    "namespace": "customer-a"
+  }
+}

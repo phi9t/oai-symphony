@@ -1,0 +1,9 @@
+{
+  "workflowId": "issue/alpha",
+  "runId": "run-00123456",
+  "status": "cancelled",
+  "readiness": {
+    "state": "not_ready",
+    "reason": "workflow-cancelled"
+  }
+}

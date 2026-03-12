@@ -154,6 +154,10 @@ No workpad was synced from Org.
 
 ## `run-result.json` contract
 
+The remote Temporal worker validates this file and copies the `.symphony` artifact bundle into
+`outputs/<run-id>/` before it cleans up the finished K3s job, so malformed or missing data fail the
+runtime handoff instead of being silently ignored.
+
 - Successful ready-for-review run:
   - `targetState`: `Human Review`
   - `needsContinuation`: `false`

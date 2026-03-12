@@ -4,7 +4,8 @@ set -eu -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly REPO_ROOT
 readonly STATE_ROOT="${REPO_ROOT}/.symphony/dev/temporal-k3s"
 readonly LOG_ROOT="${STATE_ROOT}/logs"
 readonly WORKER_PID_FILE="${STATE_ROOT}/worker.pid"
@@ -270,7 +271,8 @@ cmd_env() {
 cmd_smoke() {
     cmd_up >/dev/null
 
-    local smoke_id="smoke-$(date +%Y%m%d%H%M%S)"
+    local smoke_id
+    smoke_id="smoke-$(date +%Y%m%d%H%M%S)"
     local smoke_root="${PROJECT_ROOT}/${smoke_id}"
     local workspace_path="${smoke_root}/workspace"
     local outputs_path="${smoke_root}/outputs"

@@ -53,7 +53,8 @@ fi
 
 cd "${WORKSPACE_PATH}"
 
-export PROMPT_CONTENT="$(cat "${PROMPT_PATH}")"
+PROMPT_CONTENT="$(cat "${PROMPT_PATH}")"
+export PROMPT_CONTENT
 
 set +e
 sh -lc "${CODEX_COMMAND} \"\$PROMPT_CONTENT\"" > ".symphony/codex-output.jsonl" 2>&1

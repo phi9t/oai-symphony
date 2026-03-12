@@ -48,6 +48,9 @@ task reaches a terminal state without merge, the `before_remove` hook closes any
 before deleting the workspace. Remote runs also bound repeated Temporal status-check failures by
 `codex.stall_timeout_ms`, fail the attempt if the final Org sync cannot be written back, and start
 each retry in a fresh Temporal workflow/K3s job attempt instead of reusing the prior remote IDs.
+The Temporal helper emits readiness metadata on its JSON `run`, `status`, `cancel`, and
+`describe` payloads, reports failures through a stable JSON error envelope, and the worker copies
+remote `.symphony` artifacts into `outputs/<run-id>/` before cleaning up the finished K3s job.
 
 The repository now also ships a repo-owned Temporal/K3s developer stack for the remote backend:
 
