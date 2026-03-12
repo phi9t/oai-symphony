@@ -112,7 +112,12 @@ operations.
 The repo-owned source of truth for the phase-1 remote golden path now lives in
 [`docs/operations/phase-1-remote-validation-matrix.md`](docs/operations/phase-1-remote-validation-matrix.md).
 Use that matrix for required gate classes, contract authority, owners, and pass evidence across
-the `Org -> Elixir -> Temporal -> K3s -> Org` path.
+the `Org -> Elixir -> Temporal -> K3s -> Org` path. For day-to-day operator command lookup,
+evidence retention defaults, and retry-vs-repair guidance, use
+[`docs/operations/validation-triage.md`](docs/operations/validation-triage.md). As of March 12,
+2026, GitHub Actions still only runs the Elixir `make -C elixir all` lane; repeated stack smoke is
+operator-run or self-hosted, and failure injection remains later-phase work rather than a
+merge-blocking default.
 
 See [elixir/README.md](elixir/README.md) for the detailed bring-up, health-check, and teardown
 workflow.

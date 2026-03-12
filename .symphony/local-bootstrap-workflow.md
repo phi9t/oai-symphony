@@ -83,6 +83,7 @@ No workpad exists yet.
 8. Run concrete validation before ending the turn.
 9. Only set the task to `Human Review` when the task is actually ready for review.
 10. If blocked or only partially complete, leave the task in an active state or move it to `Rework` with a precise blocker.
+11. Use [`docs/operations/validation-triage.md`](docs/operations/validation-triage.md) for command lookup, evidence locations, and retry-vs-repair guidance, and use [`docs/operations/phase-1-remote-validation-matrix.md`](docs/operations/phase-1-remote-validation-matrix.md) for validation gate classes and pass evidence.
 
 ## Expected workflow
 

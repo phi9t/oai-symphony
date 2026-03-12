@@ -2,6 +2,8 @@
 
 This document is the repo-owned source of truth for the phase-1 remote golden path defined by [`docs/rfcs/RFC-0001-validation-verification-hardening.md`](../rfcs/RFC-0001-validation-verification-hardening.md).
 
+Use [`validation-triage.md`](validation-triage.md) for the operator command lookup, identifier correlation flow, evidence locations, retention defaults, and retry-vs-repair guidance that sit on top of this matrix.
+
 Authoritative system under test:
 
 `Org task -> Elixir orchestrator -> Temporal helper -> Temporal worker -> K3s job -> artifact bundle -> Elixir finalization -> Org task`

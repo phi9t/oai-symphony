@@ -93,6 +93,7 @@ No workpad exists yet.
 6. Use the repo-local `commit`, `push`, and `land` skills before setting `targetState: "Done"`.
 7. The workspace `origin` remote points at `https://github.com/phi9t/oai-symphony.git`. Add `upstream` as `https://github.com/openai/symphony.git` if a workflow step or skill expects it.
 8. Runtime readiness is checked before claim. If Temporal, the worker, or K3s are unavailable, the control plane will block dispatch and surface the blocker separately.
+9. Use [`docs/operations/validation-triage.md`](docs/operations/validation-triage.md) for operator triage commands, evidence locations, and retry-vs-repair guidance, and use [`docs/operations/phase-1-remote-validation-matrix.md`](docs/operations/phase-1-remote-validation-matrix.md) for required gate classes and pass evidence.
 
 ## Required local artifacts
 
