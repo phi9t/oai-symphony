@@ -184,7 +184,7 @@ defmodule SymphonyElixir.ExtensionsTest do
       match?({:ok, %{prompt: "Second prompt"}}, Workflow.current())
     end)
 
-    File.write!(Workflow.workflow_file_path(), "---\ntracker: [\n---\nBroken prompt\n")
+    File.write!(Workflow.workflow_file_path(), "---\n- invalid\n---\nBroken prompt\n")
     assert {:error, _reason} = WorkflowStore.force_reload()
     assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
 
@@ -226,7 +226,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert Process.alive?(manual_pid)
 
     state = :sys.get_state(manual_pid)
-    File.write!(manual_path, "---\ntracker: [\n---\nBroken prompt\n")
+    File.write!(manual_path, "---\n- invalid\n---\nBroken prompt\n")
     assert {:noreply, returned_state} = WorkflowStore.handle_info(:poll, state)
     assert returned_state.workflow.prompt == "Manual workflow prompt"
     refute returned_state.stamp == nil
