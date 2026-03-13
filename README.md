@@ -35,19 +35,46 @@ help with the setup:
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
 For this repository itself, the repo-local Org workflows live under [`.symphony/`](.symphony):
-`local-bootstrap-workflow.md` keeps local implementation runs in `Human Review`, while
-`fork-self-land-workflow.md` rewrites workspace remotes to `phi9t/oai-symphony` and requires
-`commit`, `push`, and `land` before `Done`, with Codex runtime settings that allow unattended
-networked GitHub operations.
+`temporal-self-land-workflow.md` is the preferred unattended path on hosts where the Temporal/K3s
+runtime is available, `fork-self-land-workflow.md` remains the local fallback and requires
+`commit`, `push`, and `land` before `Done`, and `local-bootstrap-workflow.md` keeps supervised
+local runs in `Human Review`.
 
-To smoke the self-landing queue in this repository, start Symphony with
+Those Org workflows also define a planning lane: use `org_task.deep_dive` to keep structural
+analysis or failure investigation on the current task, and use `org_task.deep_revision` in
+`draft` mode for uncertain proposals or `create` mode only for clear top-level tasks with
+description, acceptance criteria, priority, validation steps, and a blank `Codex Workpad`.
+
+On supported hosts, start the queue with `./.symphony/temporal-self-land-workflow.md` after
+bringing up the stack and exporting its environment:
+
+```bash
+./dev/temporal-k3s up
+eval "$(./dev/temporal-k3s env)"
+mise exec -- ./elixir/bin/symphony ./.symphony/temporal-self-land-workflow.md
+```
+
+The remote self-landing path claims normal Org tasks, runs them through Temporal workflows and K3s
+jobs, syncs `.symphony/workpad.md` plus `.symphony/run-result.json` back into Org, and only marks
+tasks `Done` after the PR URL and merge commit are recorded in the workpad. Before each claim,
+Symphony now probes Temporal reachability, namespace availability, active worker pollers, and the
+target K3s namespace so blocked runtimes surface immediately instead of hanging after dispatch.
+Remote runs also bound repeated Temporal status-check failures by `codex.stall_timeout_ms`, fail
+the attempt if the final Org sync cannot be written back, start each retry in a fresh
+Temporal/K3s attempt, and run the configured `before_remove` cleanup hook before deleting remote
+project workspaces.
+
+To smoke the self-landing queue in this repository without the remote stack, start Symphony with
 `./.symphony/fork-self-land-workflow.md`, move an Org task to `Todo`, and let the queue drive the
 task through implementation, fork PR creation, merge, and `Done`. After the merge is recorded in
 the Org workpad, Symphony removes the matching workspace on the next terminal cleanup pass; if a
 task reaches a terminal state without merge, the `before_remove` hook closes any leftover fork PRs
-before deleting the workspace. Remote runs also bound repeated Temporal status-check failures by
-`codex.stall_timeout_ms`, fail the attempt if the final Org sync cannot be written back, and start
-each retry in a fresh Temporal workflow/K3s job attempt instead of reusing the prior remote IDs.
+before deleting the workspace. The observability API/dashboard also exposes the active remote
+workflow/run/job identifiers, artifact directory, last successful status poll, last Org sync
+result, and stable failure code when those fields are available.
+The Temporal helper emits readiness metadata on its JSON `run`, `status`, `cancel`, and
+`describe` payloads, reports failures through a stable JSON error envelope, and the worker copies
+remote `.symphony` artifacts into `outputs/<run-id>/` before cleaning up the finished K3s job.
 
 The repository now also ships a repo-owned Temporal/K3s developer stack for the remote backend:
 
@@ -58,12 +85,48 @@ The repository now also ships a repo-owned Temporal/K3s developer stack for the 
 ./dev/temporal-k3s down
 ```
 
+`./dev/temporal-k3s smoke` is the minimum operator-run proof for the repo-managed remote runtime:
+it verifies the named Temporal container, K3s control plane, worker, namespace, workflow
+submission, K3s job execution, and smoke-artifact reconciliation as one end-to-end path. When a
+plane is broken, `status` and `smoke` now emit a specific blocker and preserve evidence under
+`.symphony/dev/projects/smoke-*/evidence/` instead of collapsing to a generic smoke failure.
+The phased lane is the default smoke path; run `./dev/temporal-k3s smoke --workflow-mode vanilla`
+to prove the required single-job fallback with the same evidence contract. The smoke evidence
+summary now records `workflow_mode`, `expected_phase`, `last_current_phase`, `last_workflow_status`,
+`last_job_status`, and `failure_plane`, so operators can identify whether the breakage is in stack
+bootstrap, Temporal, K3s, the visibility contract, or artifact reconciliation before opening raw
+logs.
+The repo-managed Temporal stack also defaults to `127.0.0.1:17233` so it does not alias an
+unrelated local Temporal server on `7233`.
+
+Repeated automation should stay on self-hosted Docker-capable runners only. Until a real
+`symphony/agent:latest` image exists, the repo-owned queue workflow to promote next is
+`./.symphony/temporal-self-land-workflow.md`, which reads `SYMPHONY_K3S_IMAGE`, while
+`./dev/temporal-k3s smoke` remains the trusted operator-run baseline.
+
 The remote K3s workflow also supports optional `k3s.default_gpu_count` and `k3s.runtime_class`
 settings for GPU-backed jobs without changing CPU-only manifests.
+
+Remote workflows now accept `temporal.workflow_mode: phased | vanilla`. `phased` is the shipped
+default and reports normalized phase-aware runtime state, while `vanilla` preserves the original
+single-agent remote job as a first-class fallback.
+When the remote backend is active, Symphony now also emits deterministic `event=...` lifecycle logs
+for issue dispatch, workflow submission, phase start/completion/failure, status polling, artifact
+sync, and final Org reconciliation.
 
 When the remote backend is configured with a non-default Temporal `address` or `namespace`, the
 helper now reuses that connection for workflow `run`, `status`, `cancel`, and `describe`
 operations.
+
+The repo-owned source of truth for the phase-1 remote golden path now lives in
+[`docs/operations/phase-1-remote-validation-matrix.md`](docs/operations/phase-1-remote-validation-matrix.md).
+Use that matrix for required gate classes, contract authority, owners, and pass evidence across
+the `Org -> Elixir -> Temporal -> K3s -> Org` path. For day-to-day operator command lookup,
+evidence retention defaults, and retry-vs-repair guidance, use
+[`docs/operations/validation-triage.md`](docs/operations/validation-triage.md). As of March 12,
+2026, GitHub Actions still only runs the Elixir `make -C elixir all` lane; repeated stack smoke is
+operator-run or self-hosted, and failure injection remains later-phase work rather than a
+merge-blocking default.
 
 See [elixir/README.md](elixir/README.md) for the detailed bring-up, health-check, and teardown
 workflow.

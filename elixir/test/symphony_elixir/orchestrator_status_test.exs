@@ -468,6 +468,35 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot.rate_limits == rate_limits
   end
 
+  test "orchestrator snapshot exposes runtime readiness blockers" do
+    orchestrator_name = Module.concat(__MODULE__, :RuntimeSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    runtime_status = %{
+      execution_backend: "temporal_k3s",
+      ready: false,
+      blockers: [
+        %{
+          "code" => "temporal_worker_missing",
+          "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"default\""
+        }
+      ],
+      checked_at: DateTime.utc_now()
+    }
+
+    initial_state = :sys.get_state(pid)
+    :sys.replace_state(pid, fn _ -> Map.put(initial_state, :runtime_status, runtime_status) end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert snapshot.runtime == runtime_status
+  end
+
   test "orchestrator token accounting prefers total_token_usage over last_token_usage in token_count payloads" do
     issue_id = "issue-token-precedence"
 

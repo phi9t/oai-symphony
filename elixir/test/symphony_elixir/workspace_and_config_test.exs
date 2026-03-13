@@ -3,6 +3,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
+  alias SymphonyElixir.Org.Client, as: OrgClient
 
   test "config reads defaults for optional settings" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
@@ -25,7 +26,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.linear_endpoint() == "https://api.linear.app/graphql"
     assert Config.linear_api_token() == nil
     assert Config.linear_project_slug() == nil
-    assert Config.workspace_root() == config_default_workspace_root()
+    assert Config.workspace_root() == runtime_default_workspace_root()
     assert Config.max_concurrent_agents() == 10
     assert Config.codex_command() == "codex app-server"
 
@@ -41,7 +42,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Config.codex_turn_sandbox_policy() == %{
              "type" => "workspaceWrite",
-             "writableRoots" => [Path.expand(config_default_workspace_root())],
+             "writableRoots" => [runtime_default_workspace_root()],
              "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
@@ -102,7 +103,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.linear_active_states() == ["Todo", "In Progress"]
     assert Config.linear_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert Config.poll_interval_ms() == 30_000
-    assert Config.workspace_root() == config_default_workspace_root()
+    assert Config.workspace_root() == runtime_default_workspace_root()
     assert Config.max_retry_backoff_ms() == 300_000
     assert Config.max_concurrent_agents_for_state("Todo") == 1
     assert Config.max_concurrent_agents_for_state("Review") == 10
@@ -243,6 +244,128 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
   end
 
+  test "org client deep_dive and deep_revision update the tracked file" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-org-client-planning-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      org_file = Path.join(test_root, "planning.org")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(
+        org_file,
+        """
+        * Symphony Root
+        :PROPERTIES:
+        :ID: ROOT-PLANNING
+        :END:
+        ** TODO [#B] Planning parent :planning:
+        :PROPERTIES:
+        :ID: parent-id
+        :SYMPHONY_IDENTIFIER: REV-PLANNING
+        :END:
+        Parent task description.
+
+        *** Codex Workpad
+        """
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "orgmode",
+        tracker_file: org_file,
+        tracker_root_id: "ROOT-PLANNING",
+        tracker_emacsclient_command: "emacs -Q --batch",
+        tracker_state_map: %{
+          "BACKLOG" => "Backlog",
+          "TODO" => "Todo",
+          "DONE" => "Done"
+        }
+      )
+
+      assert {:ok,
+              %{
+                "content" => "### Summary\nStructural review",
+                "section" => "Deep Dive",
+                "taskId" => "REV-PLANNING"
+              }} =
+               OrgClient.deep_dive("REV-PLANNING", "### Summary\nStructural review")
+
+      assert {:ok,
+              %{
+                "content" => "### Revision Summary\nDraft follow-on work",
+                "createdTasks" => [],
+                "mode" => "draft",
+                "section" => "Planning Draft",
+                "taskId" => "REV-PLANNING"
+              }} =
+               OrgClient.deep_revision(
+                 "REV-PLANNING",
+                 "draft",
+                 "### Revision Summary\nDraft follow-on work",
+                 [
+                   %{
+                     "title" => "Draft follow-on task",
+                     "state" => "Backlog",
+                     "priority" => 2,
+                     "labels" => ["planning"],
+                     "body" => "Draft body\n\n### Acceptance Criteria\n- Decide scope\n\n### Validation / Verification\n- Review with maintainers"
+                   }
+                 ]
+               )
+
+      draft_contents = File.read!(org_file)
+      assert draft_contents =~ "*** Deep Dive"
+      assert draft_contents =~ "*** Planning Draft"
+      refute draft_contents =~ "** BACKLOG [#A] Create top-level follow-on task"
+
+      assert {:ok,
+              %{
+                "content" => "### Revision Summary\nCreate follow-on work",
+                "createdTasks" => [created_task],
+                "mode" => "create",
+                "section" => "Deep Revision",
+                "taskId" => "REV-PLANNING"
+              }} =
+               OrgClient.deep_revision(
+                 "REV-PLANNING",
+                 "create",
+                 "### Revision Summary\nCreate follow-on work",
+                 [
+                   %{
+                     "title" => "Create top-level follow-on task",
+                     "state" => "Backlog",
+                     "priority" => 1,
+                     "labels" => ["planning", "orgmode"],
+                     "body" => "Task description\n\n### Acceptance Criteria\n- Task is created at the Org root\n\n### Validation / Verification\n- Inspect the created task"
+                   }
+                 ]
+               )
+
+      assert created_task.title == "Create top-level follow-on task"
+      assert created_task.state == "Backlog"
+      assert created_task.priority == 1
+      assert created_task.labels == ["planning", "orgmode"]
+      assert created_task.description =~ "Task description"
+      assert created_task.description =~ "### Acceptance Criteria"
+      assert created_task.description =~ "### Validation / Verification"
+      assert {:ok, ""} = OrgClient.get_workpad(created_task.identifier)
+
+      org_contents = File.read!(org_file)
+      assert org_contents =~ "*** Deep Revision"
+      assert org_contents =~ "** BACKLOG [#A] Create top-level follow-on task :planning:orgmode:"
+      assert org_contents =~ ":SYMPHONY_IDENTIFIER: TASK-1"
+      assert org_contents =~ "### Acceptance Criteria\n- Task is created at the Org root"
+      assert org_contents =~ "### Validation / Verification\n- Inspect the created task"
+      assert org_contents =~ "*** Codex Workpad\n"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "schema helpers cover custom type and state limit validation" do
     assert StringOrMap.type() == :map
     assert StringOrMap.embed_as(:json) == :self
@@ -279,23 +402,31 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "schema parse normalizes policy keys and env-backed fallbacks" do
     missing_workspace_env = "SYMP_MISSING_WORKSPACE_#{System.unique_integer([:positive])}"
+    present_workspace_env = "SYMP_PRESENT_WORKSPACE_#{System.unique_integer([:positive])}"
     empty_secret_env = "SYMP_EMPTY_SECRET_#{System.unique_integer([:positive])}"
     missing_secret_env = "SYMP_MISSING_SECRET_#{System.unique_integer([:positive])}"
+    present_secret_env = "SYMP_PRESENT_SECRET_#{System.unique_integer([:positive])}"
 
     previous_missing_workspace_env = System.get_env(missing_workspace_env)
+    previous_present_workspace_env = System.get_env(present_workspace_env)
     previous_empty_secret_env = System.get_env(empty_secret_env)
     previous_missing_secret_env = System.get_env(missing_secret_env)
+    previous_present_secret_env = System.get_env(present_secret_env)
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
 
     System.delete_env(missing_workspace_env)
+    System.put_env(present_workspace_env, "/tmp/present-workspace")
     System.put_env(empty_secret_env, "")
     System.delete_env(missing_secret_env)
+    System.put_env(present_secret_env, "present-secret-token")
     System.put_env("LINEAR_API_KEY", "fallback-linear-token")
 
     on_exit(fn ->
       restore_env(missing_workspace_env, previous_missing_workspace_env)
+      restore_env(present_workspace_env, previous_present_workspace_env)
       restore_env(empty_secret_env, previous_empty_secret_env)
       restore_env(missing_secret_env, previous_missing_secret_env)
+      restore_env(present_secret_env, previous_present_secret_env)
       restore_env("LINEAR_API_KEY", previous_linear_api_key)
     end)
 
@@ -321,6 +452,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert settings.tracker.api_key == "fallback-linear-token"
     assert settings.workspace.root == runtime_default_workspace_root()
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{api_key: "$#{present_secret_env}"},
+               workspace: %{root: "$#{present_workspace_env}"}
+             })
+
+    assert settings.tracker.api_key == "present-secret-token"
+    assert settings.workspace.root == Path.expand("/tmp/present-workspace")
   end
 
   test "schema resolves sandbox policies from explicit and default workspaces" do
@@ -611,10 +751,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     File.chmod!(path, 0o755)
-  end
-
-  defp config_default_workspace_root do
-    Path.join("/tmp", "symphony_workspaces")
   end
 
   defp runtime_default_workspace_root do

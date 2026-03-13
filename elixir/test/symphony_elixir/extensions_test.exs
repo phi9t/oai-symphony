@@ -7,6 +7,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Org.Adapter, as: OrgAdapter
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixirWeb.Observability.{Operator, Projection}
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -75,6 +76,24 @@ defmodule SymphonyElixir.ExtensionsTest do
       send(self(), {:org_set_task_state_called, issue_id, state_name})
       {:ok, %{id: issue_id, state: state_name}}
     end
+
+    def deep_dive(issue_id, content) do
+      send(self(), {:org_deep_dive_called, issue_id, content})
+      {:ok, %{"taskId" => issue_id, "section" => "Deep Dive", "content" => content}}
+    end
+
+    def deep_revision(issue_id, mode, content, tasks) do
+      send(self(), {:org_deep_revision_called, issue_id, mode, content, tasks})
+
+      {:ok,
+       %{
+         "taskId" => issue_id,
+         "section" => if(mode == "create", do: "Deep Revision", else: "Planning Draft"),
+         "mode" => mode,
+         "content" => content,
+         "createdTasks" => tasks
+       }}
+    end
   end
 
   defmodule SlowOrchestrator do
@@ -112,6 +131,14 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     def handle_call(:request_refresh, _from, state) do
       {:reply, Keyword.get(state, :refresh, :unavailable), state}
+    end
+
+    def handle_call({:request_retry, _issue_identifier}, _from, state) do
+      {:reply, Keyword.get(state, :retry, :issue_not_found), state}
+    end
+
+    def handle_call({:request_cleanup, _issue_identifier}, _from, state) do
+      {:reply, Keyword.get(state, :cleanup, :unavailable), state}
     end
   end
 
@@ -285,6 +312,23 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, "replacement"} = OrgAdapter.replace_workpad("issue-1", "replacement")
     assert_receive {:org_replace_workpad_called, "issue-1", "replacement"}
+
+    assert {:ok, %{"taskId" => "issue-1", "section" => "Deep Dive", "content" => "analysis"}} =
+             OrgAdapter.deep_dive("issue-1", "analysis")
+
+    assert_receive {:org_deep_dive_called, "issue-1", "analysis"}
+
+    assert {:ok,
+            %{
+              "taskId" => "issue-1",
+              "section" => "Deep Revision",
+              "mode" => "create",
+              "content" => "plan",
+              "createdTasks" => [%{"title" => "child"}]
+            }} =
+             OrgAdapter.deep_revision("issue-1", "create", "plan", [%{"title" => "child"}])
+
+    assert_receive {:org_deep_revision_called, "issue-1", "create", "plan", [%{"title" => "child"}]}
   end
 
   test "linear adapter delegates reads and validates mutation responses" do
@@ -401,6 +445,269 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
+  test "observability projections shape state and issue payloads from snapshot data" do
+    now = ~U[2026-03-12 10:00:00Z]
+    workspace_root = Config.settings!().workspace.root
+
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          state: "In Progress",
+          session_id: "thread-http",
+          turn_count: 7,
+          last_codex_event: :notification,
+          last_codex_message: "rendered",
+          last_codex_timestamp: nil,
+          codex_input_tokens: 4,
+          codex_output_tokens: 8,
+          codex_total_tokens: 12,
+          started_at: ~U[2026-03-12 09:59:00Z]
+        }
+      ],
+      retrying: [
+        %{
+          issue_id: "issue-retry",
+          identifier: "MT-RETRY",
+          attempt: 2,
+          due_in_ms: 2_000,
+          error: "boom"
+        }
+      ],
+      codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
+      rate_limits: %{"primary" => %{"remaining" => 11}}
+    }
+
+    assert Projection.state_payload_from_snapshot(snapshot, now) == %{
+             generated_at: "2026-03-12T10:00:00Z",
+             counts: %{running: 1, retrying: 1},
+             running: [
+               %{
+                 issue_id: "issue-http",
+                 issue_identifier: "MT-HTTP",
+                 state: "In Progress",
+                 session_id: "thread-http",
+                 turn_count: 7,
+                 last_event: :notification,
+                 last_message: "rendered",
+                 started_at: "2026-03-12T09:59:00Z",
+                 last_event_at: nil,
+                 tokens: %{input_tokens: 4, output_tokens: 8, total_tokens: 12}
+               }
+             ],
+             retrying: [
+               %{
+                 issue_id: "issue-retry",
+                 issue_identifier: "MT-RETRY",
+                 attempt: 2,
+                 due_at: "2026-03-12T10:00:02Z",
+                 error: "boom"
+               }
+             ],
+             codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
+             rate_limits: %{"primary" => %{"remaining" => 11}}
+           }
+
+    assert {:ok,
+            %{
+              issue_identifier: "MT-HTTP",
+              issue_id: "issue-http",
+              status: "running",
+              workspace: %{path: workspace_path},
+              attempts: %{restart_count: 0, current_retry_attempt: 0},
+              running: %{
+                session_id: "thread-http",
+                turn_count: 7,
+                state: "In Progress",
+                started_at: "2026-03-12T09:59:00Z",
+                last_event: :notification,
+                last_message: "rendered",
+                last_event_at: nil,
+                tokens: %{input_tokens: 4, output_tokens: 8, total_tokens: 12}
+              },
+              retry: nil,
+              logs: %{codex_session_logs: []},
+              recent_events: [],
+              last_error: nil,
+              tracked: %{}
+            }} = Projection.issue_payload_from_snapshot("MT-HTTP", snapshot, now)
+
+    assert workspace_path == Path.join(workspace_root, "MT-HTTP")
+
+    assert {:ok,
+            %{
+              issue_identifier: "MT-RETRY",
+              issue_id: "issue-retry",
+              status: "retrying",
+              workspace: %{path: retry_workspace_path},
+              attempts: %{restart_count: 1, current_retry_attempt: 2},
+              running: nil,
+              retry: %{attempt: 2, due_at: "2026-03-12T10:00:02Z", error: "boom"},
+              logs: %{codex_session_logs: []},
+              recent_events: [],
+              last_error: "boom",
+              tracked: %{}
+            }} = Projection.issue_payload_from_snapshot("MT-RETRY", snapshot, now)
+
+    assert retry_workspace_path == Path.join(workspace_root, "MT-RETRY")
+
+    assert {:error, :issue_not_found} = Projection.issue_payload_from_snapshot("MT-MISSING", snapshot, now)
+  end
+
+  test "observability operator surface normalizes refresh, retry, and cleanup responses" do
+    orchestrator_name = Module.concat(__MODULE__, :ObservabilityOperatorOrchestrator)
+    requested_at = ~U[2026-03-12 10:00:00Z]
+    completed_at = ~U[2026-03-12 10:00:05Z]
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{queued: true, requested_at: requested_at, operations: ["poll"]},
+        retry: %{
+          queued: true,
+          issue_identifier: "MT-HTTP",
+          requested_at: requested_at,
+          source: "running",
+          operations: ["retry"]
+        },
+        cleanup: %{
+          completed: true,
+          issue_identifier: "MT-HTTP",
+          completed_at: completed_at,
+          source: "workspace",
+          operations: ["cleanup"]
+        }
+      )
+
+    assert {:ok, %{queued: true, requested_at: "2026-03-12T10:00:00Z", operations: ["poll"]}} =
+             Operator.refresh_payload(orchestrator_name)
+
+    assert {:ok,
+            %{
+              queued: true,
+              issue_identifier: "MT-HTTP",
+              requested_at: "2026-03-12T10:00:00Z",
+              source: "running",
+              operations: ["retry"]
+            }} = Operator.retry_payload(orchestrator_name, "MT-HTTP")
+
+    assert {:ok,
+            %{
+              completed: true,
+              issue_identifier: "MT-HTTP",
+              completed_at: "2026-03-12T10:00:05Z",
+              source: "workspace",
+              operations: ["cleanup"]
+            }} = Operator.cleanup_payload(orchestrator_name, "MT-HTTP")
+
+    assert {:error, :invalid_issue_identifier} = Operator.retry_payload(orchestrator_name, "   ")
+    assert {:error, :unavailable} = Operator.refresh_payload(Module.concat(__MODULE__, :MissingOperatorOrchestrator))
+  end
+
+  test "observability projection and facade cover unavailable and delegated branches" do
+    now = ~U[2026-03-12 11:00:00Z]
+    orchestrator_name = Module.concat(__MODULE__, :ObservabilityFacadeOrchestrator)
+    slow_orchestrator = Module.concat(__MODULE__, :ObservabilitySlowOrchestrator)
+    retry_fallback_orchestrator = Module.concat(__MODULE__, :ObservabilityRetryFallbackOrchestrator)
+    fallback_orchestrator = Module.concat(__MODULE__, :ObservabilityFallbackOperatorOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{queued: true, requested_at: now},
+        retry: %{queued: true, issue_identifier: "MT-HTTP", requested_at: now},
+        cleanup: %{completed: true, issue_identifier: "MT-HTTP", completed_at: now}
+      )
+
+    {:ok, _pid} =
+      SlowOrchestrator.start_link(name: slow_orchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: retry_fallback_orchestrator,
+        snapshot: static_snapshot(),
+        refresh: :unavailable,
+        retry: :issue_not_found,
+        cleanup: :unavailable
+      )
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: fallback_orchestrator,
+        snapshot: static_snapshot(),
+        refresh: %{requested_at: "already-normalized"},
+        retry: %{queued: true, issue_identifier: "MT-HTTP", requested_at: "already-normalized"},
+        cleanup: %{completed_at: "already-normalized"}
+      )
+
+    assert Projection.state_payload(:timeout, now) == %{
+             generated_at: "2026-03-12T11:00:00Z",
+             error: %{code: "snapshot_timeout", message: "Snapshot timed out"}
+           }
+
+    assert Projection.state_payload(:unavailable, now) == %{
+             generated_at: "2026-03-12T11:00:00Z",
+             error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}
+           }
+
+    assert Projection.state_payload(:error, now) == %{
+             generated_at: "2026-03-12T11:00:00Z",
+             error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}
+           }
+
+    assert match?(%{counts: %{running: 1, retrying: 1}}, Projection.state_payload_from_snapshot(static_snapshot()))
+    assert {:error, :issue_not_found} = Projection.issue_payload("MT-HTTP", :unavailable)
+
+    assert %{counts: %{running: 1, retrying: 1}} =
+             SymphonyElixirWeb.Observability.state_payload(orchestrator_name, 50)
+
+    assert %{counts: %{running: 1, retrying: 1}} =
+             SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
+
+    assert {:ok, %{issue_identifier: "MT-HTTP"}} =
+             SymphonyElixirWeb.Observability.issue_payload("MT-HTTP", orchestrator_name, 50)
+
+    assert {:error, :issue_not_found} =
+             SymphonyElixirWeb.Observability.issue_payload("MT-MISSING", orchestrator_name, 50)
+
+    assert {:error, :issue_not_found} =
+             SymphonyElixirWeb.Presenter.issue_payload("MT-MISSING", orchestrator_name, 50)
+
+    assert %{error: %{code: "snapshot_timeout", message: "Snapshot timed out"}} =
+             SymphonyElixirWeb.Observability.state_payload(slow_orchestrator, 1)
+
+    assert %{error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}} =
+             SymphonyElixirWeb.Observability.state_payload(
+               Module.concat(__MODULE__, :MissingObservabilityOrchestrator),
+               50
+             )
+
+    assert {:ok, %{queued: true, requested_at: "2026-03-12T11:00:00Z"}} =
+             SymphonyElixirWeb.Presenter.refresh_payload(orchestrator_name)
+
+    assert {:ok, %{queued: true, issue_identifier: "MT-HTTP", requested_at: "2026-03-12T11:00:00Z"}} =
+             SymphonyElixirWeb.Presenter.retry_payload(orchestrator_name, "MT-HTTP")
+
+    assert {:ok, %{completed: true, issue_identifier: "MT-HTTP", completed_at: "2026-03-12T11:00:00Z"}} =
+             SymphonyElixirWeb.Presenter.cleanup_payload(orchestrator_name, "MT-HTTP")
+
+    assert {:error, :invalid_issue_identifier} = Operator.cleanup_payload(orchestrator_name, "   ")
+    assert {:error, :issue_not_found} = Operator.retry_payload(retry_fallback_orchestrator, "MT-HTTP")
+    assert {:error, :unavailable} = Operator.retry_payload(Module.concat(__MODULE__, :MissingRetryOrchestrator), "MT-HTTP")
+    assert {:error, :unavailable} = Operator.cleanup_payload(Module.concat(__MODULE__, :MissingCleanupOrchestrator), "MT-HTTP")
+    assert {:ok, %{requested_at: "already-normalized"}} = Operator.refresh_payload(fallback_orchestrator)
+
+    assert {:ok, %{queued: true, issue_identifier: "MT-HTTP", requested_at: "already-normalized"}} =
+             Operator.retry_payload(fallback_orchestrator, "MT-HTTP")
+
+    assert {:ok, %{completed_at: "already-normalized"}} = Operator.cleanup_payload(fallback_orchestrator, "MT-HTTP")
+    assert {:error, :invalid_issue_identifier} = SymphonyElixirWeb.Presenter.cleanup_payload(orchestrator_name, "   ")
+    assert {:error, :unavailable} = SymphonyElixirWeb.Presenter.refresh_payload(Module.concat(__MODULE__, :MissingFacadeOrchestrator))
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -422,66 +729,18 @@ defmodule SymphonyElixir.ExtensionsTest do
     conn = get(build_conn(), "/api/v1/state")
     state_payload = json_response(conn, 200)
 
-    assert state_payload == %{
-             "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
-             "running" => [
-               %{
-                 "issue_id" => "issue-http",
-                 "issue_identifier" => "MT-HTTP",
-                 "state" => "In Progress",
-                 "session_id" => "thread-http",
-                 "turn_count" => 7,
-                 "last_event" => "notification",
-                 "last_message" => "rendered",
-                 "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
-                 "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-               }
-             ],
-             "retrying" => [
-               %{
-                 "issue_id" => "issue-retry",
-                 "issue_identifier" => "MT-RETRY",
-                 "attempt" => 2,
-                 "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
-                 "error" => "boom"
-               }
-             ],
-             "codex_totals" => %{
-               "input_tokens" => 4,
-               "output_tokens" => 8,
-               "total_tokens" => 12,
-               "seconds_running" => 42.5
-             },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
-           }
+    assert state_payload["counts"] == %{"running" => 1, "retrying" => 1}
+    assert [%{"issue_identifier" => "MT-HTTP", "last_message" => "rendered"}] = state_payload["running"]
+    assert [%{"issue_identifier" => "MT-RETRY", "error" => "boom"}] = state_payload["retrying"]
+    assert state_payload["codex_totals"]["total_tokens"] == 12
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)
 
-    assert issue_payload == %{
-             "issue_identifier" => "MT-HTTP",
-             "issue_id" => "issue-http",
-             "status" => "running",
-             "workspace" => %{"path" => Path.join(Config.settings!().workspace.root, "MT-HTTP")},
-             "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
-             "running" => %{
-               "session_id" => "thread-http",
-               "turn_count" => 7,
-               "state" => "In Progress",
-               "started_at" => issue_payload["running"]["started_at"],
-               "last_event" => "notification",
-               "last_message" => "rendered",
-               "last_event_at" => nil,
-               "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-             },
-             "retry" => nil,
-             "logs" => %{"codex_session_logs" => []},
-             "recent_events" => [],
-             "last_error" => nil,
-             "tracked" => %{}
-           }
+    assert issue_payload["issue_identifier"] == "MT-HTTP"
+    assert issue_payload["status"] == "running"
+    assert issue_payload["workspace"] == %{"path" => Path.join(Config.settings!().workspace.root, "MT-HTTP")}
+    assert issue_payload["running"]["last_message"] == "rendered"
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
 
@@ -498,6 +757,222 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
              json_response(conn, 202)
+  end
+
+  test "phoenix observability api exposes remote health metadata for running and retrying issues" do
+    last_status_ok_at = ~U[2026-03-12 12:34:56Z]
+
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-remote",
+          identifier: "REV-REMOTE",
+          state: "In Progress",
+          session_id: "issue/issue-remote/run-003",
+          execution_backend: "temporal_k3s",
+          workflow_id: "issue/issue-remote",
+          workflow_run_id: "run-003",
+          project_id: "rev-remote",
+          workspace_path: "/tmp/remote/rev-remote/workspace",
+          artifact_dir: "/tmp/remote/rev-remote/artifacts",
+          job_name: "symphony-job-rev-remote",
+          last_execution_status: "running",
+          last_successful_status_poll_at: last_status_ok_at,
+          turn_count: 2,
+          codex_app_server_pid: nil,
+          last_codex_message: "remote rendered",
+          last_codex_timestamp: nil,
+          last_codex_event: :notification,
+          codex_input_tokens: 5,
+          codex_output_tokens: 7,
+          codex_total_tokens: 12,
+          started_at: ~U[2026-03-12 12:00:00Z]
+        }
+      ],
+      retrying: [
+        %{
+          issue_id: "issue-remote-retry",
+          identifier: "REV-REMOTE-RETRY",
+          attempt: 3,
+          due_in_ms: 2_000,
+          error: "agent exited: remote Org sync failed",
+          execution_backend: "temporal_k3s",
+          workflow_id: "issue/issue-remote-retry",
+          workflow_run_id: "run-008",
+          project_id: "rev-remote-retry",
+          workspace_path: "/tmp/remote/rev-remote-retry/workspace",
+          artifact_dir: "/tmp/remote/rev-remote-retry/artifacts",
+          job_name: "symphony-job-rev-remote-retry",
+          last_execution_status: "failed",
+          last_successful_status_poll_at: last_status_ok_at,
+          last_known_org_sync_result: %{step: "state", status: "error", target_state: "Done"},
+          failure_code: "org_state_sync_failed"
+        }
+      ],
+      codex_totals: %{input_tokens: 5, output_tokens: 7, total_tokens: 12, seconds_running: 8.5},
+      rate_limits: %{"primary" => %{"remaining" => 9}}
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :RemoteHealthApiOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert state_payload["running"] == [
+             %{
+               "issue_id" => "issue-remote",
+               "issue_identifier" => "REV-REMOTE",
+               "state" => "In Progress",
+               "session_id" => "issue/issue-remote/run-003",
+               "execution_backend" => "temporal_k3s",
+               "workflow_id" => "issue/issue-remote",
+               "workflow_run_id" => "run-003",
+               "project_id" => "rev-remote",
+               "workspace_path" => "/tmp/remote/rev-remote/workspace",
+               "artifact_dir" => "/tmp/remote/rev-remote/artifacts",
+               "job_name" => "symphony-job-rev-remote",
+               "last_execution_status" => "running",
+               "last_successful_status_poll" => "2026-03-12T12:34:56Z",
+               "turn_count" => 2,
+               "last_event" => "notification",
+               "last_message" => "remote rendered",
+               "started_at" => "2026-03-12T12:00:00Z",
+               "last_event_at" => nil,
+               "tokens" => %{"input_tokens" => 5, "output_tokens" => 7, "total_tokens" => 12}
+             }
+           ]
+
+    assert state_payload["retrying"] == [
+             %{
+               "issue_id" => "issue-remote-retry",
+               "issue_identifier" => "REV-REMOTE-RETRY",
+               "attempt" => 3,
+               "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
+               "error" => "agent exited: remote Org sync failed",
+               "execution_backend" => "temporal_k3s",
+               "workflow_id" => "issue/issue-remote-retry",
+               "workflow_run_id" => "run-008",
+               "project_id" => "rev-remote-retry",
+               "workspace_path" => "/tmp/remote/rev-remote-retry/workspace",
+               "artifact_dir" => "/tmp/remote/rev-remote-retry/artifacts",
+               "job_name" => "symphony-job-rev-remote-retry",
+               "last_execution_status" => "failed",
+               "last_successful_status_poll" => "2026-03-12T12:34:56Z",
+               "last_known_org_sync_result" => %{
+                 "step" => "state",
+                 "status" => "error",
+                 "target_state" => "Done"
+               },
+               "failure_code" => "org_state_sync_failed"
+             }
+           ]
+
+    issue_payload = json_response(get(build_conn(), "/api/v1/REV-REMOTE-RETRY"), 200)
+
+    assert issue_payload == %{
+             "issue_identifier" => "REV-REMOTE-RETRY",
+             "issue_id" => "issue-remote-retry",
+             "status" => "retrying",
+             "workspace" => %{"path" => "/tmp/remote/rev-remote-retry/workspace"},
+             "attempts" => %{"restart_count" => 2, "current_retry_attempt" => 3},
+             "running" => nil,
+             "retry" => %{
+               "attempt" => 3,
+               "due_at" => issue_payload["retry"]["due_at"],
+               "error" => "agent exited: remote Org sync failed",
+               "execution_backend" => "temporal_k3s",
+               "workflow_id" => "issue/issue-remote-retry",
+               "workflow_run_id" => "run-008",
+               "project_id" => "rev-remote-retry",
+               "workspace_path" => "/tmp/remote/rev-remote-retry/workspace",
+               "artifact_dir" => "/tmp/remote/rev-remote-retry/artifacts",
+               "job_name" => "symphony-job-rev-remote-retry",
+               "last_execution_status" => "failed",
+               "last_successful_status_poll" => "2026-03-12T12:34:56Z",
+               "last_known_org_sync_result" => %{
+                 "step" => "state",
+                 "status" => "error",
+                 "target_state" => "Done"
+               },
+               "failure_code" => "org_state_sync_failed"
+             },
+             "logs" => %{"codex_session_logs" => []},
+             "recent_events" => [],
+             "last_error" => "agent exited: remote Org sync failed",
+             "tracked" => %{}
+           }
+  end
+
+  test "Presenter handles unavailable issue snapshots and mixed running plus retry state" do
+    orchestrator_name = Module.concat(__MODULE__, :PresenterMixedStateOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: %{
+          running: [
+            %{
+              issue_id: "issue-dual",
+              identifier: "REV-DUAL",
+              state: "In Progress",
+              session_id: "thread-dual",
+              turn_count: 0,
+              codex_app_server_pid: nil,
+              last_codex_message: nil,
+              last_codex_timestamp: nil,
+              last_codex_event: nil,
+              codex_input_tokens: 0,
+              codex_output_tokens: 0,
+              codex_total_tokens: 0,
+              started_at: ~U[2026-03-12 13:00:00Z]
+            }
+          ],
+          retrying: [
+            %{
+              issue_id: "issue-dual",
+              identifier: "REV-DUAL",
+              attempt: 1,
+              due_in_ms: nil,
+              error: "waiting on follow-up"
+            }
+          ],
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 1.0},
+          rate_limits: nil
+        },
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    assert {:ok, payload} =
+             SymphonyElixirWeb.Presenter.issue_payload("REV-DUAL", orchestrator_name, 50)
+
+    assert payload.status == "running"
+    assert payload.running.last_message == nil
+    assert payload.retry.due_at == nil
+
+    assert {:error, :issue_not_found} =
+             SymphonyElixirWeb.Presenter.issue_payload(
+               "REV-DUAL",
+               Module.concat(__MODULE__, :MissingPresenterIssueOrchestrator),
+               5
+             )
   end
 
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
@@ -534,6 +1009,52 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "phoenix observability api surfaces runtime readiness blockers" do
+    snapshot =
+      static_snapshot()
+      |> Map.put(:runtime, %{
+        execution_backend: "temporal_k3s",
+        ready: false,
+        blockers: [
+          %{
+            "code" => "temporal_worker_missing",
+            "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"default\""
+          }
+        ],
+        checked_at: DateTime.utc_now()
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RuntimeObservabilityApiOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll", "reconcile"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert state_payload["runtime"] == %{
+             "execution_backend" => "temporal_k3s",
+             "ready" => false,
+             "blockers" => [
+               %{
+                 "code" => "temporal_worker_missing",
+                 "message" => "no Temporal worker is polling task queue \"symphony\" in namespace \"default\""
+               }
+             ],
+             "checked_at" => state_payload["runtime"]["checked_at"]
+           }
   end
 
   test "phoenix observability api preserves snapshot timeout behavior" do

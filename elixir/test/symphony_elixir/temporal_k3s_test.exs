@@ -88,7 +88,11 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
     on_exit(fn ->
       if Process.alive?(runner_state) do
-        Agent.stop(runner_state)
+        try do
+          Agent.stop(runner_state)
+        catch
+          :exit, _reason -> :ok
+        end
       end
     end)
 
@@ -281,7 +285,11 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
     on_exit(fn ->
       if Process.alive?(runner_state) do
-        Agent.stop(runner_state)
+        try do
+          Agent.stop(runner_state)
+        catch
+          :exit, _reason -> :ok
+        end
       end
     end)
 
@@ -355,7 +363,11 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
     on_exit(fn ->
       if Process.alive?(runner_state) do
-        Agent.stop(runner_state)
+        try do
+          Agent.stop(runner_state)
+        catch
+          :exit, _reason -> :ok
+        end
       end
     end)
 
@@ -407,4 +419,12 @@ defmodule SymphonyElixir.TemporalK3sTest do
 
     assert %{status_calls: 3} = Agent.get(runner_state, & &1)
   end
+end
+
+defmodule SymphonyElixir.TemporalK3sRecoveryScenarioHarnessTest do
+  use SymphonyElixir.TestSupport
+
+  import SymphonyElixir.TestSupport.RecoveryScenarioHarness
+
+  define_scenarios(SymphonyElixir.TestSupport.RecoveryScenarioHarness.TemporalAdapter)
 end
