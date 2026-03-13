@@ -1,3 +1,5 @@
 ExUnit.start()
 Code.require_file("support/snapshot_support.exs", __DIR__)
+Code.require_file("support/scenario_support.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)
+Code.require_file("support/temporal_k3s_support.exs", __DIR__)
